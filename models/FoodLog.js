@@ -11,6 +11,21 @@ const foodLogSchema = new mongoose.Schema({
     required: true,
     trim: true
   },
+  /** Original human-language input */
+  rawDescription: {
+    type: String,
+    trim: true
+  },
+  /** AI-organized one-line summary for history UI */
+  organizedSummary: {
+    type: String,
+    trim: true
+  },
+  /** Structured breakdown from AI (items, portions, etc.) */
+  parsedDetails: {
+    type: mongoose.Schema.Types.Mixed,
+    default: null
+  },
   portionSize: {
     amount: { type: Number, required: true },
     unit: { type: String, required: true, enum: ['g', 'ml', 'cup', 'piece', 'serving'] }

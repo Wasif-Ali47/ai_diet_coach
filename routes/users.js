@@ -2,6 +2,7 @@ import express from 'express';
 import { body } from 'express-validator';
 import { authenticate } from '../middleware/auth.js';
 import * as userController from '../controllers/userController.js';
+import * as coachQuestionnaireController from '../controllers/coachQuestionnaireController.js';
 
 const router = express.Router();
 
@@ -58,6 +59,31 @@ router.put('/profile/diet', authenticate, [
 router.put('/settings', authenticate, [
   body('settings').isObject().optional()
 ], userController.updateSettings);
+
+// AI Coach questionnaire (post-intro onboarding)
+router.get('/coach-questionnaire', authenticate, coachQuestionnaireController.getCoachQuestionnaire);
+router.get('/coach-questionnaire/food-catalog', authenticate, coachQuestionnaireController.getFoodCatalog);
+router.put('/coach-questionnaire', authenticate, [
+  body('mainGoal').optional().isString(),
+  body('age').optional().isInt({ min: 10, max: 120 }),
+  body('heightCm').optional().isFloat({ min: 50, max: 300 }),
+  body('weight').optional().isFloat({ min: 20, max: 500 }),
+  body('targetWeight').optional().isFloat({ min: 20, max: 500 }),
+  body('preferredCuisine').optional().isString(),
+  body('healthConditions').optional().isArray(),
+  body('foodRestrictions').optional().isArray(),
+  body('likedFoods').optional().isArray(),
+  body('activityLevel').optional().isString(),
+  body('weightLossPace').optional().isIn(['slow', 'balanced', 'fast']),
+  body('foodStyles').optional().isArray(),
+  body('dailyRoutine').optional().isString(),
+  body('foodPreparer').optional().isString(),
+  body('weightLossProblems').optional().isArray(),
+  body('healthConditionsOther').optional().isString(),
+  body('foodRestrictionsOther').optional().isString(),
+  body('likedFoodsOther').optional().isString(),
+  body('questionnaireComplete').optional().isBoolean()
+], coachQuestionnaireController.updateCoachQuestionnaire);
 
 // Mark onboarding as complete
 router.put('/onboarding/complete', authenticate, userController.completeOnboarding);

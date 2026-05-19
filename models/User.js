@@ -179,6 +179,24 @@ const userSchema = new mongoose.Schema({
       default: true
     }
   },
+  // AI Coach questionnaire (post-intro onboarding)
+  coachProfile: {
+    mainGoal: { type: String },
+    age: { type: Number },
+    targetWeight: { type: Number },
+    preferredCuisine: { type: String },
+    foodRestrictions: [{ type: String }],
+    likedFoods: [{ type: String }],
+    weightLossPace: { type: String },
+    foodStyles: [{ type: String }],
+    dailyRoutine: { type: String },
+    foodPreparer: { type: String },
+    weightLossProblems: [{ type: String }],
+    healthConditionsOther: { type: String },
+    foodRestrictionsOther: { type: String },
+    likedFoodsOther: { type: String },
+    questionnaireComplete: { type: Boolean, default: false }
+  },
   // Onboarding
   onboardingComplete: {
     type: Boolean,

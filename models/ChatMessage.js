@@ -23,12 +23,19 @@ const chatMessageSchema = new mongoose.Schema({
   responseType: {
     type: String,
     enum: ['blood_sugar', 'meal_plan', 'medication', 'symptoms', 'general', 'default']
+  },
+  conversationId: {
+    type: String,
+    index: true
+  },
+  conversationTitle: {
+    type: String
   }
 }, {
   timestamps: true
 });
 
-// Index for efficient queries
 chatMessageSchema.index({ userId: 1, createdAt: -1 });
+chatMessageSchema.index({ userId: 1, conversationId: 1, createdAt: -1 });
 
 export default mongoose.model('ChatMessage', chatMessageSchema);

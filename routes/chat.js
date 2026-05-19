@@ -10,7 +10,10 @@ router.post('/message', authenticate, [
   body('message').trim().notEmpty()
 ], chatController.sendMessage);
 
-// Get chat history
+// List conversations
+router.get('/conversations', authenticate, chatController.getConversations);
+
+// Get chat history (optional conversationId query)
 router.get('/history', authenticate, chatController.getChatHistory);
 
 // Clear chat history

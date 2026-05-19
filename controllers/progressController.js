@@ -1,5 +1,6 @@
 import ProgressLog from '../models/ProgressLog.js';
 import FoodLog from '../models/FoodLog.js';
+import { proteinFromLog, toLocalDateKey } from '../utils/foodLogHelpers.js';
 import ActivityLog from '../models/ActivityLog.js';
 import MealPlan from '../models/MealPlan.js';
 import SymptomLog from '../models/SymptomLog.js';
@@ -83,17 +84,52 @@ export const getWeightProgress = async (req, res) => {
 /**
  * Get progress dashboard data (calorie adherence, macro balance, symptom frequency)
  */
+function emptyDaySummary(dateKey) {
+  return {
+    date: dateKey,
+    caloriesConsumed: 0,
+    caloriesBurned: 0,
+    carbs: 0,
+    protein: 0,
+    fat: 0,
+    fibre: 0,
+    symptoms: {},
+  };
+}
+
+function computeLoggingStreak(caloriesByDay, timezoneOffset) {
+  let streak = 0;
+  const cursor = new Date();
+  for (let i = 0; i < 365; i++) {
+    const key = toLocalDateKey(cursor, timezoneOffset);
+    if ((caloriesByDay[key] || 0) > 0) {
+      streak += 1;
+    } else {
+      break;
+    }
+    cursor.setDate(cursor.getDate() - 1);
+  }
+  return streak;
+}
+
 export const getProgressDashboard = async (req, res) => {
   try {
-    const { startDate, endDate, granularity } = req.query;
-    let start;
+    const { startDate, endDate, granularity, timezoneOffset } = req.query;
     const end = endDate ? new Date(endDate) : new Date();
+    let start;
     if (startDate) {
       start = new Date(startDate);
     } else {
       start = new Date();
       start.setDate(start.getDate() - 7);
     }
+
+    const periodFilter = {
+      $or: [
+        { date: { $gte: start, $lte: end } },
+        { timestamp: { $gte: start, $lte: end } },
+      ],
+    };
 
     // Get user's meal plan for targets
     const mealPlan = await MealPlan.findOne({
@@ -108,75 +144,87 @@ export const getProgressDashboard = async (req, res) => {
       fat: 61
     };
 
-    // Get food logs for the period
     const foodLogs = await FoodLog.find({
       userId: req.userId,
-      date: { $gte: start, $lte: end }
-    });
+      ...periodFilter,
+    }).lean();
 
-    // Get activity logs for the period
     const activityLogs = await ActivityLog.find({
       userId: req.userId,
-      date: { $gte: start, $lte: end }
-    });
+      ...periodFilter,
+    }).lean();
 
-    // Get symptom logs for the period
     const symptomLogs = await SymptomLog.find({
       userId: req.userId,
-      date: { $gte: start, $lte: end }
-    });
+      ...periodFilter,
+    }).lean();
 
-    // Calculate daily summaries
+    // Streak: consecutive days with food logged (up to 30 days lookback)
+    const streakStart = new Date();
+    streakStart.setDate(streakStart.getDate() - 30);
+    const streakLogs = await FoodLog.find({
+      userId: req.userId,
+      $or: [
+        { date: { $gte: streakStart, $lte: end } },
+        { timestamp: { $gte: streakStart, $lte: end } },
+      ],
+    }).lean();
+
+    const caloriesByDay = {};
+    streakLogs.forEach((log) => {
+      const dateKey = toLocalDateKey(log.timestamp || log.date, timezoneOffset);
+      caloriesByDay[dateKey] = (caloriesByDay[dateKey] || 0) + (Number(log.calories) || 0);
+    });
+    const loggingStreak = computeLoggingStreak(caloriesByDay, timezoneOffset);
+
+    // Daily summaries for chart (local calendar days)
     const dailySummaries = {};
-    const dates = [];
+    const dateKeys = [];
+
     for (let d = new Date(start); d <= end; d.setDate(d.getDate() + 1)) {
-      const dateKey = d.toISOString().split('T')[0];
-      dates.push(dateKey);
-      dailySummaries[dateKey] = {
-        date: dateKey,
-        caloriesConsumed: 0,
-        caloriesBurned: 0,
-        carbs: 0,
-        protein: 0,
-        fat: 0,
-        fibre: 0,
-        symptoms: {}
-      };
+      const dateKey = toLocalDateKey(d, timezoneOffset);
+      if (!dailySummaries[dateKey]) {
+        dateKeys.push(dateKey);
+        dailySummaries[dateKey] = emptyDaySummary(dateKey);
+      }
     }
 
-    // Aggregate food logs
-    foodLogs.forEach(log => {
-      const dateKey = log.date.toISOString().split('T')[0];
-      if (dailySummaries[dateKey]) {
-        dailySummaries[dateKey].caloriesConsumed += log.calories || 0;
-        dailySummaries[dateKey].carbs += log.macros?.carbs || 0;
-        dailySummaries[dateKey].protein += log.macros?.protein || 0;
-        dailySummaries[dateKey].fat += log.macros?.fat || 0;
-        dailySummaries[dateKey].fibre += log.macros?.fibre || 0;
+    foodLogs.forEach((log) => {
+      const dateKey = toLocalDateKey(log.timestamp || log.date, timezoneOffset);
+      if (!dailySummaries[dateKey]) {
+        dateKeys.push(dateKey);
+        dailySummaries[dateKey] = emptyDaySummary(dateKey);
       }
+      dailySummaries[dateKey].caloriesConsumed += Number(log.calories) || 0;
+      dailySummaries[dateKey].carbs += Number(log.macros?.carbs) || 0;
+      dailySummaries[dateKey].protein += proteinFromLog(log);
+      dailySummaries[dateKey].fat += Number(log.macros?.fat) || 0;
+      dailySummaries[dateKey].fibre += Number(log.macros?.fibre) || 0;
     });
 
-    // Aggregate activity logs
-    activityLogs.forEach(log => {
-      const dateKey = log.date.toISOString().split('T')[0];
-      if (dailySummaries[dateKey]) {
-        dailySummaries[dateKey].caloriesBurned += log.caloriesBurned || 0;
+    activityLogs.forEach((log) => {
+      const dateKey = toLocalDateKey(log.timestamp || log.date, timezoneOffset);
+      if (!dailySummaries[dateKey]) {
+        dateKeys.push(dateKey);
+        dailySummaries[dateKey] = emptyDaySummary(dateKey);
       }
+      dailySummaries[dateKey].caloriesBurned += Number(log.caloriesBurned) || 0;
     });
 
-    // Aggregate symptom logs
-    symptomLogs.forEach(log => {
-      const dateKey = log.date.toISOString().split('T')[0];
-      if (dailySummaries[dateKey]) {
-        if (!dailySummaries[dateKey].symptoms[log.symptomType]) {
-          dailySummaries[dateKey].symptoms[log.symptomType] = [];
-        }
-        dailySummaries[dateKey].symptoms[log.symptomType].push(log.rating);
+    symptomLogs.forEach((log) => {
+      const dateKey = toLocalDateKey(log.timestamp || log.date, timezoneOffset);
+      if (!dailySummaries[dateKey]) {
+        dateKeys.push(dateKey);
+        dailySummaries[dateKey] = emptyDaySummary(dateKey);
       }
+      if (!dailySummaries[dateKey].symptoms[log.symptomType]) {
+        dailySummaries[dateKey].symptoms[log.symptomType] = [];
+      }
+      dailySummaries[dateKey].symptoms[log.symptomType].push(log.rating);
     });
 
     // Calculate adherence percentages
-    const summaries = dates.map(dateKey => {
+    const summaries = dateKeys.sort().map((dateKey) => {
       const summary = dailySummaries[dateKey];
       const netCalories = summary.caloriesConsumed - summary.caloriesBurned;
       const adherence = dailyCalorieTarget > 0 
@@ -264,6 +312,7 @@ export const getProgressDashboard = async (req, res) => {
       endDate: end.toISOString(),
       dailyCalorieTarget,
       dailyMacroTargets,
+      loggingStreak,
       summaries: resultSummaries
     });
   } catch (error) {

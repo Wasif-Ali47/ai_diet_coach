@@ -1,8 +1,30 @@
+import mongoose from 'mongoose';
 import ChatMessage from '../models/ChatMessage.js';
 import User from '../models/User.js';
 import { generateChatResponse } from '../services/openaiService.js';
 import { verifyIapPurchase } from '../services/iapVerificationService.js';
 import { validationResult } from 'express-validator';
+import {
+  buildConversationTitle,
+  newConversationId,
+  parseDisplayTitle,
+} from '../utils/chatConversationUtils.js';
+
+function serializeMessage(doc) {
+  return {
+    id: doc._id,
+    _id: doc._id,
+    userId: doc.userId,
+    message: doc.message,
+    isUser: doc.isUser,
+    confidence: doc.confidence,
+    responseType: doc.responseType,
+    conversationId: doc.conversationId,
+    conversationTitle: doc.conversationTitle,
+    createdAt: doc.createdAt,
+    updatedAt: doc.updatedAt,
+  };
+}
 
 const FREE_CHAT_LIMIT = Number(process.env.CARE_FREE_CHAT_LIMIT || 5);
 
@@ -77,7 +99,7 @@ export const sendMessage = async (req, res) => {
       });
     }
 
-    const { message } = req.body;
+    const { message, conversationId: bodyConversationId, conversationTitle: bodyTitle } = req.body;
     const user = await User.findById(req.userId);
 
     if (!user) {
@@ -97,18 +119,35 @@ export const sendMessage = async (req, res) => {
       });
     }
 
-    // Get recent chat history for context
-    const recentMessages = await ChatMessage.find({ userId: req.userId })
+    let conversationId = bodyConversationId || newConversationId();
+    let conversationTitle = bodyTitle;
+
+    const existingInConvo = await ChatMessage.findOne({
+      userId: req.userId,
+      conversationId,
+    }).select('conversationTitle').lean();
+
+    if (existingInConvo?.conversationTitle) {
+      conversationTitle = existingInConvo.conversationTitle;
+    } else if (!conversationTitle) {
+      conversationTitle = buildConversationTitle(message).storageTitle;
+    }
+
+    const recentMessages = await ChatMessage.find({
+      userId: req.userId,
+      conversationId,
+    })
       .sort({ createdAt: -1 })
       .limit(10)
       .select('message isUser')
       .lean();
 
-    // Save user message
     const userMessage = new ChatMessage({
       userId: req.userId,
       message,
-      isUser: true
+      isUser: true,
+      conversationId,
+      conversationTitle,
     });
     await userMessage.save();
     user.careUsage = {
@@ -132,27 +171,19 @@ export const sendMessage = async (req, res) => {
         message: aiResponse.text,
         isUser: false,
         confidence: aiResponse.confidence,
-        responseType: aiResponse.type
+        responseType: aiResponse.type,
+        conversationId,
+        conversationTitle,
       });
       await aiMessage.save();
 
       res.json({
         success: true,
         entitlement: updatedEntitlement,
-        userMessage: {
-          id: userMessage._id,
-          message: userMessage.message,
-          isUser: true,
-          createdAt: userMessage.createdAt
-        },
-        aiMessage: {
-          id: aiMessage._id,
-          message: aiMessage.message,
-          isUser: false,
-          confidence: aiMessage.confidence,
-          responseType: aiMessage.responseType,
-          createdAt: aiMessage.createdAt
-        }
+        conversationId,
+        conversationTitle,
+        userMessage: serializeMessage(userMessage),
+        aiMessage: serializeMessage(aiMessage),
       });
     } catch (openaiError) {
       console.error('OpenAI error:', openaiError);
@@ -165,27 +196,19 @@ export const sendMessage = async (req, res) => {
         message: fallbackResponse.text,
         isUser: false,
         confidence: fallbackResponse.confidence,
-        responseType: fallbackResponse.type
+        responseType: fallbackResponse.type,
+        conversationId,
+        conversationTitle,
       });
       await aiMessage.save();
 
       res.json({
         success: true,
         entitlement: updatedEntitlement,
-        userMessage: {
-          id: userMessage._id,
-          message: userMessage.message,
-          isUser: true,
-          createdAt: userMessage.createdAt
-        },
-        aiMessage: {
-          id: aiMessage._id,
-          message: aiMessage.message,
-          isUser: false,
-          confidence: aiMessage.confidence,
-          responseType: aiMessage.responseType,
-          createdAt: aiMessage.createdAt
-        }
+        conversationId,
+        conversationTitle,
+        userMessage: serializeMessage(userMessage),
+        aiMessage: serializeMessage(aiMessage),
       });
     }
   } catch (error) {
@@ -203,7 +226,7 @@ export const sendMessage = async (req, res) => {
  */
 export const getChatHistory = async (req, res) => {
   try {
-    const { limit = 50 } = req.query;
+    const { limit = 100, conversationId } = req.query;
     const user = await User.findById(req.userId);
     if (!user) {
       return res.status(404).json({
@@ -212,18 +235,27 @@ export const getChatHistory = async (req, res) => {
       });
     }
 
-    const messages = await ChatMessage.find({ userId: req.userId })
-      .sort({ createdAt: -1 })
-      .limit(parseInt(limit));
+    const filter = { userId: req.userId };
+    if (conversationId === 'legacy') {
+      filter.$or = [
+        { conversationId: null },
+        { conversationId: { $exists: false } },
+      ];
+    } else if (conversationId) {
+      filter.conversationId = conversationId;
+    }
 
-    // Reverse to show oldest first
+    const messages = await ChatMessage.find(filter)
+      .sort({ createdAt: -1 })
+      .limit(parseInt(limit, 10));
+
     messages.reverse();
 
     res.json({
       success: true,
       count: messages.length,
       entitlement: await buildEntitlement(user),
-      messages
+      messages: messages.map(serializeMessage),
     });
   } catch (error) {
     console.error('Get chat history error:', error);
@@ -236,15 +268,80 @@ export const getChatHistory = async (req, res) => {
 };
 
 /**
- * Clear chat history
+ * List chat conversations (one tile per chat, not per message).
  */
-export const clearChatHistory = async (req, res) => {
+export const getConversations = async (req, res) => {
   try {
-    await ChatMessage.deleteMany({ userId: req.userId });
+    const user = await User.findById(req.userId);
+    if (!user) {
+      return res.status(404).json({ success: false, message: 'User not found' });
+    }
+
+    const userObjectId = new mongoose.Types.ObjectId(req.userId);
+    const rows = await ChatMessage.aggregate([
+      { $match: { userId: userObjectId } },
+      { $sort: { createdAt: -1 } },
+      {
+        $group: {
+          _id: {
+            $ifNull: ['$conversationId', 'legacy'],
+          },
+          conversationTitle: { $first: '$conversationTitle' },
+          updatedAt: { $first: '$createdAt' },
+          preview: { $first: '$message' },
+          isUser: { $first: '$isUser' },
+        },
+      },
+      { $sort: { updatedAt: -1 } },
+    ]);
+
+    const conversations = rows.map((row) => {
+      const storageTitle = row.conversationTitle || row.preview || 'Chat';
+      return {
+        conversationId: row._id,
+        conversationTitle: storageTitle,
+        displayTitle: parseDisplayTitle(storageTitle),
+        updatedAt: row.updatedAt,
+        preview: row.preview,
+      };
+    });
 
     res.json({
       success: true,
-      message: 'Chat history cleared successfully'
+      conversations,
+    });
+  } catch (error) {
+    console.error('Get conversations error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to list conversations',
+      error: error.message,
+    });
+  }
+};
+
+/**
+ * Clear chat history (all or one conversation).
+ */
+export const clearChatHistory = async (req, res) => {
+  try {
+    const { conversationId } = req.query;
+    const filter = { userId: req.userId };
+    if (conversationId === 'legacy') {
+      filter.$or = [
+        { conversationId: null },
+        { conversationId: { $exists: false } },
+      ];
+    } else if (conversationId) {
+      filter.conversationId = conversationId;
+    }
+    await ChatMessage.deleteMany(filter);
+
+    res.json({
+      success: true,
+      message: conversationId
+        ? 'Conversation deleted successfully'
+        : 'Chat history cleared successfully',
     });
   } catch (error) {
     console.error('Clear chat history error:', error);
