@@ -8,6 +8,16 @@ import cors from 'cors';
 import dns from 'dns';
 import { startReminderPushScheduler } from './services/reminderPushScheduler.js';
 import { ensureFirebaseAdmin } from './utils/firebaseAdminInit.js';
+import { logEmailConfigStatus, verifyEmailTransport } from './services/emailService.js';
+
+const AUTH_BUILD_TAG = 'otp-email-v2';
+console.error(`\n========== AI DIET COACH BACKEND [${AUTH_BUILD_TAG}] ==========\n`);
+
+logEmailConfigStatus();
+verifyEmailTransport().catch((err) => {
+  console.error('[auth][otp] ⚠️ SMTP verify failed at startup:', err?.message || err);
+  console.error('[auth][otp] OTP emails will likely fail until Gmail credentials are fixed.');
+});
 
 // Some ISPs / Windows resolvers fail SRV/TXT lookups required by mongodb+srv://
 // (we see ESERVFAIL on queryTxt). Force a reliable public DNS resolver so the
@@ -20,23 +30,6 @@ try {
 }
 
 const app = express();
-
-// Middleware
-// Global request logger to see every incoming request
-app.use((req, res, next) => {
-  const start = Date.now();
-  console.log(`➡️  ${req.method} ${req.originalUrl}`);
-  if (Object.keys(req.body || {}).length > 0) {
-    console.log('   Body:', JSON.stringify(req.body, null, 2));
-  }
-  res.on('finish', () => {
-    const duration = Date.now() - start;
-    console.log(`⬅️  ${req.method} ${req.originalUrl} ${res.statusCode} (${duration} ms)`);
-  });
-  next();
-});
-
-
 
 const corsOptions = {
   origin: function (origin, callback) {
@@ -64,6 +57,22 @@ const corsOptions = {
 app.use(cors(corsOptions));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
+
+// Request logger (after body parser so POST bodies are visible)
+app.use((req, res, next) => {
+  const start = Date.now();
+  console.log(`➡️  ${req.method} ${req.originalUrl}`);
+  if (req.body && Object.keys(req.body).length > 0) {
+    const safe = { ...req.body };
+    if (safe.password) safe.password = '***';
+    console.log('   Body:', JSON.stringify(safe));
+  }
+  res.on('finish', () => {
+    const duration = Date.now() - start;
+    console.log(`⬅️  ${req.method} ${req.originalUrl} ${res.statusCode} (${duration} ms)`);
+  });
+  next();
+});
 
 // Routes
 import authRoutes from './routes/auth.js';
@@ -111,9 +120,13 @@ app.get('/api', (req, res) => {
       auth: {
         base: '/api/auth',
         endpoints: [
+          'POST /signup',
+          'POST /verify-otp',
+          'POST /resend-otp',
           'POST /register',
           'POST /login',
           'POST /guest',
+          'POST /upgrade-guest',
           'GET /verify'
         ]
       },
@@ -202,8 +215,9 @@ mongoose.connect(MONGODB_URI, { dbName: MONGODB_DB_NAME })
     console.log('[reminderPush] Firebase Admin at startup:', fb ? 'ready (FCM can send)' : 'missing credentials (reminder pushes will not send)');
     startReminderPushScheduler();
     app.listen(PORT, () => {
-      console.log(`🚀 Server running on port ${PORT}`);
+      console.error(`🚀 Server running [${AUTH_BUILD_TAG}] on port ${PORT}`);
       console.log(`📡 API available at http://localhost:${PORT}/api`);
+      console.error('[auth] OTP signup: POST /api/auth/signup → sends email via Gmail SMTP');
     });
   })
   .catch((error) => {

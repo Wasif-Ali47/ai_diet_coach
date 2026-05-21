@@ -1,16 +1,58 @@
 import express from 'express';
-import { body } from 'express-validator';
+import { body, validationResult } from 'express-validator';
 import * as authController from '../controllers/authController.js';
+import { authenticate } from '../middleware/auth.js';
+import { checkUserExistsByEmail } from '../middleware/checkUserExistsByEmail.js';
 
 const router = express.Router();
 
-// Register new user
-router.post('/register', [
-  body('email').isEmail().normalizeEmail(),
-  body('password').isLength({ min: 6 }).optional(),
+function validateAuthRequest(req, res, next) {
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) {
+    console.error('[auth] Validation failed:', JSON.stringify(errors.array()));
+    return res.status(400).json({
+      error: errors.array()[0]?.msg || 'Validation failed',
+      errors: errors.array(),
+    });
+  }
+  next();
+}
+
+const signUpValidators = [
+  body('email').isEmail().withMessage('Invalid email').normalizeEmail(),
+  body('password').isLength({ min: 6 }).withMessage('Password must be at least 6 characters'),
+  body('name').trim().optional(),
   body('firstName').trim().optional(),
-  body('lastName').trim().optional()
-], authController.register);
+  body('lastName').trim().optional(),
+  body().custom((_, { req }) => {
+    const name = req.body?.name?.trim()
+      || [req.body?.firstName, req.body?.lastName].filter(Boolean).join(' ').trim();
+    if (!name) throw new Error('name required');
+    return true;
+  }),
+];
+
+// OTP sign-up (sample_backend) — returns userId, no token
+router.post(
+  '/signup',
+  signUpValidators,
+  validateAuthRequest,
+  checkUserExistsByEmail,
+  authController.signUp
+);
+
+// Legacy alias
+router.post(
+  '/register',
+  signUpValidators,
+  validateAuthRequest,
+  checkUserExistsByEmail,
+  authController.register
+);
+
+router.post('/verify-otp', authController.verifyOtp);
+
+router.post('/resend-otp', authController.resendOtp);
 
 // Login user
 router.post('/login', [
@@ -20,6 +62,14 @@ router.post('/login', [
 
 // Guest login
 router.post('/guest', authController.guestLogin);
+
+// Guest → full account (same Mongo user, new email + password)
+router.post('/upgrade-guest', authenticate, [
+  body('email').isEmail().normalizeEmail(),
+  body('password').isLength({ min: 6 }),
+  body('firstName').trim().notEmpty(),
+  body('lastName').trim().optional(),
+], authController.upgradeGuest);
 
 // Verify token
 router.get('/verify', authController.verifyToken);

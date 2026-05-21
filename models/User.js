@@ -13,6 +13,18 @@ const userSchema = new mongoose.Schema({
     type: String,
     required: false // Optional for guest users
   },
+  otp: {
+    type: String,
+    default: null,
+  },
+  emailVerified: {
+    type: Boolean,
+    default: undefined,
+  },
+  resetOTP: {
+    type: String,
+    default: null,
+  },
   firstName: {
     type: String,
     trim: true

@@ -2,82 +2,217 @@ import User from '../models/User.js';
 import { generateToken, JWT_SECRET } from '../middleware/auth.js';
 import { validationResult } from 'express-validator';
 import jwt from 'jsonwebtoken';
+import { sendOTPEmail } from '../services/emailService.js';
+import { AUTH_MESSAGES } from '../utils/authMessages.js';
+
+console.error('[auth] authController loaded — OTP email signup ENABLED');
+
+function resolveDisplayName(body) {
+  if (body.name?.trim()) return body.name.trim();
+  const first = body.firstName?.trim() || '';
+  const last = body.lastName?.trim() || '';
+  const combined = `${first} ${last}`.trim();
+  return combined || null;
+}
+
+function splitNameToFirstLast(displayName) {
+  if (!displayName) return { firstName: undefined, lastName: undefined };
+  const parts = displayName.split(/\s+/).filter(Boolean);
+  if (parts.length === 0) return { firstName: undefined, lastName: undefined };
+  if (parts.length === 1) return { firstName: parts[0], lastName: undefined };
+  return {
+    firstName: parts[0],
+    lastName: parts.slice(1).join(' '),
+  };
+}
 
 /**
- * Register new user
+ * Sign up with OTP email (sample_backend flow) — no JWT until verify-otp + login.
  */
-export const register = async (req, res) => {
+export const signUp = async (req, res) => {
   try {
-    console.log('=== USER REGISTRATION START ===');
-    console.log('[register] Request received');
-    console.log('[register] Request body:', JSON.stringify(req.body, null, 2));
-    console.log('[register] Request headers:', JSON.stringify(req.headers, null, 2));
-    
-    const errors = validationResult(req);
-    if (!errors.isEmpty()) {
-      console.log('[register] ❌ Validation errors:', errors.array());
-      return res.status(400).json({
-        success: false,
-        message: 'Validation error',
-        errors: errors.array()
-      });
+    const body = req.body;
+    console.error('[auth][signup] ========== POST /signup ==========');
+
+    if (!body) {
+      console.log('[auth][signup] FAILED: empty body');
+      return res.status(400).json({ error: AUTH_MESSAGES.ALL_FIELDS_REQUIRED });
     }
 
-    const { email, password, firstName, lastName } = req.body;
-    console.log('[register] Extracted data: email=' + email + ', firstName=' + firstName + ', lastName=' + lastName + ', hasPassword=' + !!password);
-
-    // Check if user already exists
-    console.log('[register] Checking if user exists...');
-    let user = await User.findOne({ email });
-    if (user) {
-      console.log('[register] ❌ User already exists with email: ' + email);
-      return res.status(400).json({
-        success: false,
-        message: 'User already exists with this email'
-      });
+    const displayName = resolveDisplayName(body);
+    if (!displayName) {
+      console.log('[auth][signup] FAILED: name required');
+      return res.status(400).json({ error: AUTH_MESSAGES.NAME_REQUIRED });
     }
-    console.log('[register] ✓ User does not exist, proceeding with registration');
+    if (!body.email?.trim()) {
+      console.log('[auth][signup] FAILED: email required');
+      return res.status(400).json({ error: AUTH_MESSAGES.EMAIL_REQUIRED });
+    }
+    if (!body.password) {
+      console.log('[auth][signup] FAILED: password required');
+      return res.status(400).json({ error: AUTH_MESSAGES.PASSWORD_REQUIRED });
+    }
 
-    // Create new user (password is optional for guest users)
-    console.log('[register] Creating new user...');
-    user = new User({
+    const email = (body.email || '').trim().toLowerCase();
+    const { firstName, lastName } = splitNameToFirstLast(displayName);
+    const otp = Math.floor(100000 + Math.random() * 900000).toString();
+
+    console.log(`[auth][signup] Creating user email=${email} name=${displayName} otp=${otp}`);
+
+    const user = new User({
       email,
-      password: password || undefined,
+      password: body.password,
       firstName,
-      lastName
+      lastName,
+      otp,
+      emailVerified: false,
     });
 
-    console.log('[register] Saving user to database...');
     await user.save();
-    console.log('[register] ✓ User saved successfully. User ID:', user._id);
+    console.log(`[auth][signup] User saved id=${user._id}`);
 
-    console.log('[register] Generating JWT token...');
-    const token = generateToken(user._id);
-    console.log('[register] ✓ Token generated');
+    console.log(`[auth][signup] Calling sendOTPEmail for ${email}...`);
+    try {
+      await sendOTPEmail(email, otp);
+      console.log(`[auth][signup] ✅ sendOTPEmail completed for ${email}`);
+    } catch (mailErr) {
+      console.error('[auth][signup] ❌ OTP send failed, rolling back user:', mailErr?.message || mailErr);
+      await User.findByIdAndDelete(user._id);
+      return res.status(500).json({
+        error: AUTH_MESSAGES.OTP_SEND_FAILED,
+        detail: mailErr?.message || 'SMTP error',
+      });
+    }
 
-    console.log('[register] ✓ Registration successful');
-    console.log('=== USER REGISTRATION END ===');
-
+    console.log(`[auth][signup] SUCCESS userId=${user._id}`);
     res.status(201).json({
-      success: true,
-      message: 'User registered successfully',
-      token,
-      user: {
-        id: user._id,
-        email: user.email,
-        firstName: user.firstName,
-        lastName: user.lastName,
-        onboardingComplete: user.onboardingComplete
+      message: 'User created. OTP sent to email.',
+      userId: user._id.toString(),
+      success: AUTH_MESSAGES.SIGNED_UP,
+    });
+  } catch (err) {
+    console.error('[auth][signup] FAILED:', err?.message || err);
+    if (err?.code === 11000) {
+      return res.status(409).json({ error: AUTH_MESSAGES.USER_EXISTS });
+    }
+    res.status(500).json({ error: AUTH_MESSAGES.SIGN_UP_FAILED });
+  }
+};
+
+/** Alias for legacy `/register` clients — same OTP signup, no token. */
+export const register = signUp;
+
+/**
+ * Verify email OTP — `POST /api/auth/verify-otp`
+ */
+export const verifyOtp = async (req, res) => {
+  try {
+    const { userId, otp } = req.body;
+    console.log(`[auth][verify-otp] userId=${userId}`);
+
+    if (
+      userId == null ||
+      otp === undefined ||
+      otp === null ||
+      String(otp).trim() === ''
+    ) {
+      console.log('[auth][verify-otp] FAILED: missing userId or otp');
+      return res.status(400).json({ error: AUTH_MESSAGES.USER_ID_OTP_REQUIRED });
+    }
+
+    const user = await User.findById(userId);
+    if (!user) {
+      console.log('[auth][verify-otp] FAILED: user not found');
+      return res.status(400).json({ error: AUTH_MESSAGES.USER_NOT_FOUND });
+    }
+
+    if (user.otp !== String(otp).trim()) {
+      console.log(`[auth][verify-otp] FAILED: invalid otp for ${user.email}`);
+      return res.status(400).json({ error: AUTH_MESSAGES.INVALID_OTP });
+    }
+
+    user.emailVerified = true;
+    user.otp = null;
+    await user.save();
+
+    console.log(`[auth][verify-otp] SUCCESS email=${user.email}`);
+    res.json({ message: 'Email verified successfully.' });
+  } catch (err) {
+    console.error('[auth][verify-otp] FAILED:', err?.message || err);
+    res.status(500).json({ error: AUTH_MESSAGES.NETWORK_ERROR });
+  }
+};
+
+/**
+ * Resend verification OTP — body: `userId` OR (`email` + `password` for login flow).
+ */
+export const resendOtp = async (req, res) => {
+  try {
+    const { userId, email, password } = req.body;
+    console.log('[auth][resend-otp] request received', {
+      hasUserId: !!userId,
+      email: email?.trim() || null,
+    });
+
+    let user = null;
+    if (userId) {
+      user = await User.findById(userId);
+    } else if (email?.trim()) {
+      const normalizedEmail = email.trim().toLowerCase();
+      user = await User.findOne({ email: normalizedEmail });
+      if (!user) {
+        console.log('[auth][resend-otp] FAILED: user not found for email');
+        return res.status(400).json({ error: AUTH_MESSAGES.USER_NOT_FOUND });
       }
+      if (!password) {
+        console.log('[auth][resend-otp] FAILED: password required with email');
+        return res.status(400).json({ error: AUTH_MESSAGES.PASSWORD_REQUIRED });
+      }
+      const ok = await user.comparePassword(password);
+      if (!ok) {
+        console.log('[auth][resend-otp] FAILED: wrong password');
+        return res.status(400).json({ error: AUTH_MESSAGES.WRONG_PASSWORD });
+      }
+    } else {
+      console.log('[auth][resend-otp] FAILED: userId or email required');
+      return res.status(400).json({ error: 'userId or email is required' });
+    }
+
+    if (!user) {
+      console.log('[auth][resend-otp] FAILED: user not found');
+      return res.status(400).json({ error: AUTH_MESSAGES.USER_NOT_FOUND });
+    }
+
+    if (user.emailVerified === true) {
+      console.log(`[auth][resend-otp] FAILED: already verified ${user.email}`);
+      return res.status(400).json({ error: 'Email is already verified.' });
+    }
+
+    const otp = Math.floor(100000 + Math.random() * 900000).toString();
+    user.otp = otp;
+    user.emailVerified = false;
+    await user.save();
+    console.log(`[auth][resend-otp] New OTP saved for ${user.email} otp=${otp}`);
+
+    console.log(`[auth][resend-otp] Calling sendOTPEmail for ${user.email}...`);
+    try {
+      await sendOTPEmail(user.email, otp);
+      console.log(`[auth][resend-otp] ✅ sendOTPEmail completed for ${user.email}`);
+    } catch (mailErr) {
+      console.error('[auth][resend-otp] ❌ OTP send failed:', mailErr?.message || mailErr);
+      return res.status(500).json({
+        error: AUTH_MESSAGES.OTP_SEND_FAILED,
+        detail: mailErr?.message || 'SMTP error',
+      });
+    }
+
+    res.json({
+      message: 'OTP sent successfully.',
+      userId: user._id.toString(),
     });
-  } catch (error) {
-    console.error('[register] ❌ Registration error:', error);
-    console.error('[register] Error stack:', error.stack);
-    res.status(500).json({
-      success: false,
-      message: 'Registration failed',
-      error: error.message
-    });
+  } catch (err) {
+    console.error('[auth][resend-otp] FAILED:', err?.message || err);
+    res.status(500).json({ error: AUTH_MESSAGES.NETWORK_ERROR });
   }
 };
 
@@ -96,45 +231,52 @@ export const login = async (req, res) => {
     }
 
     const { email, password } = req.body;
+    const normalizedEmail = email?.trim().toLowerCase();
 
     // Find user
-    const user = await User.findOne({ email });
+    const user = await User.findOne({ email: normalizedEmail });
     if (!user) {
-      return res.status(401).json({
-        success: false,
-        message: 'Invalid email or password'
+      return res.status(400).json({ error: AUTH_MESSAGES.USER_NOT_FOUND });
+    }
+
+    if (user.emailVerified === false) {
+      console.log(`[auth][login] BLOCKED unverified email=${normalizedEmail} userId=${user._id}`);
+      return res.status(400).json({
+        error: AUTH_MESSAGES.EMAIL_NOT_VERIFIED,
+        userId: user._id.toString(),
       });
     }
 
     // Check password
     if (!user.password) {
-      return res.status(401).json({
-        success: false,
-        message: 'No password set for this account. Please register with a password.'
+      return res.status(400).json({
+        error: 'No password set for this account. Please register with a password.',
       });
     }
 
     const isMatch = await user.comparePassword(password);
     if (!isMatch) {
-      return res.status(401).json({
-        success: false,
-        message: 'Invalid email or password'
-      });
+      return res.status(400).json({ error: AUTH_MESSAGES.WRONG_PASSWORD });
     }
 
     const token = generateToken(user._id);
+    const displayName = [user.firstName, user.lastName].filter(Boolean).join(' ').trim();
 
     res.json({
       success: true,
+      successMessage: AUTH_MESSAGES.LOGGED_IN,
       message: 'Login successful',
       token,
+      userId: user._id,
+      username: displayName || user.firstName || 'User',
+      useremail: user.email,
       user: {
         id: user._id,
         email: user.email,
         firstName: user.firstName,
         lastName: user.lastName,
-        onboardingComplete: user.onboardingComplete
-      }
+        onboardingComplete: user.onboardingComplete,
+      },
     });
   } catch (error) {
     console.error('Login error:', error);
@@ -172,7 +314,7 @@ export const guestLogin = async (req, res) => {
       message: 'Guest session created',
       token,
       user: {
-        id: user._id,
+        id: user._id.toString(),
         email: user.email,
         firstName: user.firstName,
         onboardingComplete: user.onboardingComplete
@@ -191,6 +333,99 @@ export const guestLogin = async (req, res) => {
 /**
  * Verify token
  */
+/**
+ * Upgrade a guest account to a full email/password account (same user id).
+ * Requires Bearer token for the guest user.
+ */
+export const upgradeGuest = async (req, res) => {
+  try {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({
+        success: false,
+        message: 'Validation error',
+        errors: errors.array()
+      });
+    }
+
+    const userId = req.userId;
+    const { email, password, firstName, lastName } = req.body;
+
+    const user = await User.findById(userId);
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: 'User not found'
+      });
+    }
+
+    const em = (user.email || '').toLowerCase();
+    const isGuest = /^guest_[^@]+@diabeticcoach\.app$/i.test(em);
+    if (!isGuest) {
+      return res.status(400).json({
+        success: false,
+        message: 'This account is already a full account. Use profile settings to change your email.'
+      });
+    }
+
+    const normalizedEmail = email.trim().toLowerCase();
+    const existing = await User.findOne({ email: normalizedEmail, _id: { $ne: userId } });
+    if (existing) {
+      return res.status(409).json({
+        error: AUTH_MESSAGES.USER_EXISTS,
+        message: 'An account with this email already exists. Sign in instead.',
+      });
+    }
+
+    const previousEmail = user.email;
+    const previousPassword = user.password;
+    const otp = Math.floor(100000 + Math.random() * 900000).toString();
+
+    user.email = normalizedEmail;
+    user.password = password;
+    user.firstName = firstName || user.firstName;
+    if (lastName !== undefined) user.lastName = lastName;
+    user.emailVerified = false;
+    user.otp = otp;
+
+    await user.save();
+
+    console.log(`[auth][upgrade-guest] Calling sendOTPEmail to ${normalizedEmail} otp=${otp}`);
+    try {
+      await sendOTPEmail(normalizedEmail, otp);
+      console.log(`[auth][upgrade-guest] ✅ sendOTPEmail completed for ${normalizedEmail}`);
+    } catch (mailErr) {
+      console.error('[auth][upgrade-guest] ❌ OTP send failed:', mailErr?.message || mailErr);
+      user.email = previousEmail;
+      user.password = previousPassword;
+      user.emailVerified = undefined;
+      user.otp = null;
+      await user.save();
+      return res.status(500).json({ error: AUTH_MESSAGES.OTP_SEND_FAILED });
+    }
+
+    res.json({
+      success: true,
+      message: 'OTP sent to email. Verify to complete account setup.',
+      userId: user._id,
+      user: {
+        id: user._id.toString(),
+        email: user.email,
+        firstName: user.firstName,
+        lastName: user.lastName,
+        onboardingComplete: user.onboardingComplete,
+      },
+    });
+  } catch (error) {
+    console.error('upgradeGuest error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Could not upgrade account',
+      error: error.message
+    });
+  }
+};
+
 export const verifyToken = async (req, res) => {
   try {
     const token = req.header('Authorization')?.replace('Bearer ', '');
