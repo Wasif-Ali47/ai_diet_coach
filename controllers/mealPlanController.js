@@ -80,7 +80,11 @@ function calculateMacroTargets(calories) {
 export const generateMealPlan = async (req, res) => {
   const startTime = Date.now();
   try {
-    console.log('[generateMealPlan] Starting meal plan generation...');
+    // days=1 (single-day plan, fast generation right after questionnaire)
+    // days=7 (full-week plan, user-initiated from Plan tab)
+    const requestedDays = parseInt(req.body?.days, 10) === 1 ? 1 : 7;
+    console.log(`[generateMealPlan] Starting meal plan generation (days=${requestedDays})...`);
+
     const user = await User.findById(req.userId);
     if (!user) return res.status(404).json({ success: false, message: "User not found" });
 
@@ -91,7 +95,7 @@ export const generateMealPlan = async (req, res) => {
     const startDate = new Date();
     startDate.setHours(0, 0, 0, 0);
     const endDate = new Date(startDate);
-    endDate.setDate(endDate.getDate() + 6);
+    endDate.setDate(endDate.getDate() + (requestedDays - 1));
 
     // Deactivate existing active plans
     await MealPlan.updateMany({ userId: req.userId, isActive: true }, { isActive: false });
@@ -99,47 +103,62 @@ export const generateMealPlan = async (req, res) => {
     const days = [];
     let aiDays = null;
 
-    // Try to generate all 7 days in one API call (faster)
-    try {
-      console.log('[generateMealPlan] Attempting to generate full 7-day plan in one API call...');
-      aiDays = await generateMealPlanWithAI(user, dailyCalorieTarget, dailyMacroTargets);
-      
-      if (aiDays && Array.isArray(aiDays) && aiDays.length >= 7) {
-        console.log('[generateMealPlan] ✅ Successfully generated full 7-day plan in one call');
-      } else {
-        throw new Error('Incomplete 7-day plan received');
-      }
-    } catch (err) {
-      console.warn('[generateMealPlan] Full plan generation failed, falling back to parallel per-day generation:', err.message);
-      aiDays = null;
-    }
-
-    // If full plan failed, generate days in parallel (much faster than sequential)
-    if (!aiDays) {
-      console.log('[generateMealPlan] Generating days in parallel...');
-      const dayPromises = [];
-      
-      for (let i = 0; i < 7; i++) {
-        dayPromises.push(
-          generateMealPlanDayWithAI(user, dailyCalorieTarget, dailyMacroTargets, i + 1)
-            .catch(err => {
-              console.warn(`[generateMealPlan] Day ${i + 1} AI generation failed, will use fallback:`, err.message);
-              return null; // Return null to trigger fallback
-            })
+    if (requestedDays === 1) {
+      // Single-day path: one OpenAI call only
+      console.log('[generateMealPlan] Generating single-day plan...');
+      try {
+        const dayMeals = await generateMealPlanDayWithAI(
+          user,
+          dailyCalorieTarget,
+          dailyMacroTargets,
+          1
         );
+        aiDays = [{ meals: dayMeals || [] }];
+      } catch (err) {
+        console.warn('[generateMealPlan] Single-day AI generation failed, will use fallback:', err.message);
+        aiDays = [{ meals: [] }];
+      }
+    } else {
+      // Try to generate all 7 days in one API call (faster)
+      try {
+        console.log('[generateMealPlan] Attempting to generate full 7-day plan in one API call...');
+        aiDays = await generateMealPlanWithAI(user, dailyCalorieTarget, dailyMacroTargets);
+
+        if (aiDays && Array.isArray(aiDays) && aiDays.length >= 7) {
+          console.log('[generateMealPlan] ✅ Successfully generated full 7-day plan in one call');
+        } else {
+          throw new Error('Incomplete 7-day plan received');
+        }
+      } catch (err) {
+        console.warn('[generateMealPlan] Full plan generation failed, falling back to parallel per-day generation:', err.message);
+        aiDays = null;
       }
 
-      // Wait for all days in parallel (max 15 seconds instead of 7 × 15 = 105 seconds)
-      const dayResults = await Promise.all(dayPromises);
-      
-      // Convert to same format as full plan response
-      aiDays = dayResults.map((meals, index) => ({
-        meals: meals || [] // Will be replaced with fallback if null
-      }));
+      // If full plan failed, generate days in parallel (much faster than sequential)
+      if (!aiDays) {
+        console.log('[generateMealPlan] Generating days in parallel...');
+        const dayPromises = [];
+
+        for (let i = 0; i < 7; i++) {
+          dayPromises.push(
+            generateMealPlanDayWithAI(user, dailyCalorieTarget, dailyMacroTargets, i + 1)
+              .catch(err => {
+                console.warn(`[generateMealPlan] Day ${i + 1} AI generation failed, will use fallback:`, err.message);
+                return null; // Return null to trigger fallback
+              })
+          );
+        }
+
+        const dayResults = await Promise.all(dayPromises);
+
+        aiDays = dayResults.map((meals, index) => ({
+          meals: meals || []
+        }));
+      }
     }
 
     // Process each day
-    for (let i = 0; i < 7; i++) {
+    for (let i = 0; i < requestedDays; i++) {
       const dayDate = new Date(startDate);
       dayDate.setDate(dayDate.getDate() + i);
 
@@ -205,11 +224,11 @@ export const generateMealPlan = async (req, res) => {
     await mealPlan.save();
 
     const totalTime = Date.now() - startTime;
-    console.log(`[generateMealPlan] ✅ Meal plan generated successfully in ${totalTime}ms`);
+    console.log(`[generateMealPlan] ✅ Meal plan generated successfully (${requestedDays} day${requestedDays === 1 ? '' : 's'}) in ${totalTime}ms`);
 
     res.status(201).json({
       success: true,
-      message: "Meal plan generated successfully",
+      message: `Meal plan generated successfully (${requestedDays}-day)`,
       mealPlan,
     });
   } catch (error) {
