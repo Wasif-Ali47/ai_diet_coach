@@ -15,4 +15,7 @@ export const AUTH_MESSAGES = {
   INVALID_OTP: 'Invalid OTP.',
   EMAIL_NOT_VERIFIED: 'Email not verified.',
   USER_ID_OTP_REQUIRED: 'userId and otp are required',
+  GOOGLE_TOKEN_INVALID: 'Invalid Google sign-in. Please try again.',
+  GOOGLE_NOT_CONFIGURED: 'Google sign-in is not configured on the server.',
+  GOOGLE_NO_EMAIL: 'Your Google account has no email address.',
 };

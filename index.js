@@ -91,6 +91,7 @@ import progressRoutes from './routes/progress.js';
 import exportRoutes from './routes/export.js';
 import logRoutes from './routes/logs.js';
 import homeRoutes from './routes/home.js';
+import knowledgeRoutes from './routes/knowledge.js';
 
 // API Routes
 app.use('/api/auth', authRoutes);
@@ -109,6 +110,7 @@ app.use('/api/home', homeRoutes);
 app.use('/api/export', exportRoutes);
 app.use('/api/admin/auth', adminAuthRoutes);
 app.use('/api/admin', adminRoutes);
+app.use('/api/knowledge', knowledgeRoutes);
 
 // API index (for humans / monitoring — lists main route groups)
 app.get('/api', (req, res) => {
@@ -160,7 +162,23 @@ app.get('/api', (req, res) => {
       chat: { base: '/api/chat', endpoints: ['POST /message', 'GET /history', 'GET /entitlement', 'POST /iap/verify'] },
       reminders: { base: '/api/reminders', endpoints: ['GET /', 'POST /', 'PUT /:id', 'DELETE /:id'] },
       export: { base: '/api/export', endpoints: ['GET /data'] },
-      notifications: { base: '/api/notifications', endpoints: ['POST /register-token', 'POST /send'] }
+      notifications: { base: '/api/notifications', endpoints: ['POST /register-token', 'POST /send'] },
+      knowledge: {
+        base: '/api/knowledge',
+        note: 'AI Learning Knowledge Base. GET routes are public; write routes require admin JWT or KNOWLEDGE_API_KEY.',
+        endpoints: [
+          'GET /',
+          'GET /stats',
+          'GET /categories',
+          'GET /merged',
+          'GET /:id',
+          'POST / (auth)',
+          'PUT /:id (auth)',
+          'PATCH /:id/deactivate (auth)',
+          'PATCH /:id/reactivate (auth)',
+          'DELETE /:id (auth)'
+        ]
+      }
     }
   });
 });

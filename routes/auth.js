@@ -60,6 +60,9 @@ router.post('/login', [
   body('password').notEmpty()
 ], authController.login);
 
+// Google Sign-In (ID token from Flutter)
+router.post('/google', authController.googleSignIn);
+
 // Guest login
 router.post('/guest', authController.guestLogin);
 

@@ -21,7 +21,14 @@ function getOpenAI() {
 }
 
 // ---------------------------------------------------------------------------
-// Helper: build a compact "diabetic user context" block reused by every prompt
+// Helper: Build a compact "user health & diet profile" from questionnaire data
+// Data sources:
+// - user.coachProfile.* (from questionnaire steps 0-10)
+// - user.health* fields (diabetesType, fastingSugar, hba1c, healthConditions, medications)
+// - user.dietPreferences.* (dietary restrictions mapped from food restrictions)
+// - user.foodLikes/Dislikes/localFoodPreferences (liked foods questionnaire)
+// - user.budget, cookingTime (lifestyle preferences)
+// - user.activityLevel, height, weight (physical info)
 // ---------------------------------------------------------------------------
 function buildDiabeticContext(user) {
   const dietStyle = [
@@ -40,23 +47,43 @@ function buildDiabeticContext(user) {
   const dislikes = (user.foodDislikes || []).join(', ') || 'None';
   const localFoods = (user.localFoodPreferences || []).join(', ') || 'No specific local foods';
 
-  return `DIABETIC USER PROFILE
+  // Map from questionnaire data structure:
+  // coachProfile.mainGoal, age, targetWeight, preferredCuisine, weightLossPace, dailyRoutine, foodPreparer, weightLossProblems
+  const coachProfile = user.coachProfile || {};
+  const mainGoal = coachProfile.mainGoal || 'Not specified';
+  const age = coachProfile.age || 'Not provided';
+  const targetWeight = coachProfile.targetWeight || 'Not set';
+  const cuisine = coachProfile.preferredCuisine || 'No preference';
+  const pace = coachProfile.weightLossPace || 'Not specified';
+  const routine = coachProfile.dailyRoutine || 'Not specified';
+  const preparer = coachProfile.foodPreparer || 'Not specified';
+  const challenges = (coachProfile.weightLossProblems || []).join(', ') || 'None reported';
+
+  return `USER HEALTH & DIET PROFILE
+- Main Goal: ${mainGoal}
+- Age: ${age} | Height: ${user.height?.cm || 'Not recorded'} cm | Weight: ${user.weight || 'Not recorded'} kg | Target: ${targetWeight} kg
 - Diabetes status: ${user.diabetesType || 'Not specified'}
+- Other health conditions: ${healthConditions}
 - Latest fasting blood sugar: ${user.fastingSugar != null ? user.fastingSugar + ' mg/dL' : 'Not recorded'}
 - Latest HbA1c: ${user.hba1c != null ? user.hba1c + ' %' : 'Not recorded'}
-- Other health conditions: ${healthConditions}
 - Medications & timing: ${meds}
+- Activity level: ${user.activityLevel || 'Not specified'}
+- Weight loss pace: ${pace}
 - Diet style: ${dietStyle}
 - Allergies: ${allergies}
+- Preferred cuisine: ${cuisine}
 - Likes: ${likes}
 - Dislikes: ${dislikes}
 - Local food preferences: ${localFoods}
 - Budget: ${user.budget || 'Medium'}
-- Cooking time available: ${user.cookingTime || 'Moderate (20-40 min)'}`;
+- Cooking time available: ${user.cookingTime || 'Moderate (20-40 min)'}
+- Daily routine: ${routine}
+- Food preparer: ${preparer}
+- Weight loss challenges: ${challenges}`;
 }
 
-const DIABETIC_SYSTEM_PROMPT = `You are a certified diabetes-focused nutrition coach for the "Diabetic Diet AI Coach" app.
-You specialise in blood sugar control, low glycaemic index (low-GI) eating, and culturally appropriate diabetic meals — especially South Asian / Pakistani / Indian foods (roti, rice, daal, salan, qeema, biryani, fruits).
+const DIABETIC_SYSTEM_PROMPT = `You are a certified nutrition coach for the "AI Diet Coach" app.
+You specialise in blood sugar control, low glycaemic index (low-GI) eating, and culturally appropriate health-conscious meals — especially South Asian / Pakistani / Indian foods (roti, rice, daal, salan, qeema, biryani, fruits).
 Core principles you ALWAYS apply:
 1. Prioritise low-GI, high-fibre carbs. Limit refined sugar and white-flour foods.
 2. Show clear PORTIONS in everyday units: "½ roti", "1 roti", "½ cup cooked rice", "1 small fruit", "1 cup daal".

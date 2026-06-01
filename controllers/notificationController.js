@@ -1,25 +1,6 @@
 import User from '../models/User.js';
 import { validationResult } from 'express-validator';
-
-// Initialize Firebase Admin (optional)
-let admin;
-(async () => {
-  try {
-    const firebaseAdmin = await import('firebase-admin');
-    admin = firebaseAdmin.default;
-    
-    if (process.env.FIREBASE_SERVICE_ACCOUNT) {
-      const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
-      if (!admin.apps || admin.apps.length === 0) {
-        admin.initializeApp({
-          credential: admin.credential.cert(serviceAccount)
-        });
-      }
-    }
-  } catch (error) {
-    console.log('Firebase Admin not initialized. Push notifications will be disabled.');
-  }
-})();
+import { getMessaging } from '../utils/firebaseAdminInit.js';
 
 /**
  * Register device token
@@ -149,7 +130,8 @@ export const registerToken = async (req, res) => {
  */
 export const sendNotification = async (req, res) => {
   try {
-    if (!admin) {
+    const messaging = getMessaging();
+    if (!messaging) {
       return res.status(503).json({
         success: false,
         message: 'Push notifications not configured. Firebase Admin not initialized.'
@@ -186,7 +168,7 @@ export const sendNotification = async (req, res) => {
     };
 
     try {
-      const response = await admin.messaging().sendEachForMulticast(message);
+      const response = await messaging.sendEachForMulticast(message);
       
       res.json({
         success: true,

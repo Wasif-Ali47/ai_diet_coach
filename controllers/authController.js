@@ -2,8 +2,13 @@ import User from '../models/User.js';
 import { generateToken, JWT_SECRET } from '../middleware/auth.js';
 import { validationResult } from 'express-validator';
 import jwt from 'jsonwebtoken';
+import { OAuth2Client } from 'google-auth-library';
 import { sendOTPEmail } from '../services/emailService.js';
 import { AUTH_MESSAGES } from '../utils/authMessages.js';
+
+const googleOAuthClient = process.env.GOOGLE_CLIENT_ID
+  ? new OAuth2Client(process.env.GOOGLE_CLIENT_ID)
+  : null;
 
 console.error('[auth] authController loaded — OTP email signup ENABLED');
 
@@ -284,6 +289,101 @@ export const login = async (req, res) => {
       success: false,
       message: 'Login failed',
       error: error.message
+    });
+  }
+};
+
+/**
+ * Sign in / register with Google ID token (Flutter google_sign_in).
+ * POST /api/auth/google  { idToken }
+ */
+export const googleSignIn = async (req, res) => {
+  try {
+    const { idToken } = req.body;
+    if (!idToken || typeof idToken !== 'string') {
+      return res.status(400).json({ error: 'idToken required' });
+    }
+    if (!googleOAuthClient) {
+      console.error('[auth][google] GOOGLE_CLIENT_ID not set in .env');
+      return res.status(500).json({ error: AUTH_MESSAGES.GOOGLE_NOT_CONFIGURED });
+    }
+
+    let payload;
+    try {
+      const ticket = await googleOAuthClient.verifyIdToken({
+        idToken,
+        audience: process.env.GOOGLE_CLIENT_ID,
+      });
+      payload = ticket.getPayload();
+    } catch (verifyErr) {
+      console.error('[auth][google] Token verify failed:', verifyErr?.message || verifyErr);
+      return res.status(401).json({ error: AUTH_MESSAGES.GOOGLE_TOKEN_INVALID });
+    }
+
+    const googleId = payload.sub;
+    const email = (payload.email || '').trim().toLowerCase();
+    if (!email) {
+      return res.status(400).json({ error: AUTH_MESSAGES.GOOGLE_NO_EMAIL });
+    }
+
+    const { firstName, lastName } = splitNameToFirstLast(
+      payload.name || [payload.given_name, payload.family_name].filter(Boolean).join(' ')
+    );
+
+    let user = await User.findOne({ $or: [{ googleId }, { email }] });
+
+    if (!user) {
+      user = new User({
+        email,
+        googleId,
+        firstName: firstName || payload.given_name || 'User',
+        lastName: lastName || payload.family_name,
+        emailVerified: true,
+        onboardingComplete: false,
+      });
+      await user.save();
+      console.log(`[auth][google] New user id=${user._id} email=${email}`);
+    } else {
+      if (!user.googleId) {
+        user.googleId = googleId;
+      }
+      if (user.emailVerified !== true) {
+        user.emailVerified = true;
+      }
+      if (!user.firstName && (firstName || payload.given_name)) {
+        user.firstName = firstName || payload.given_name;
+      }
+      if (!user.lastName && (lastName || payload.family_name)) {
+        user.lastName = lastName || payload.family_name;
+      }
+      await user.save();
+      console.log(`[auth][google] Existing user id=${user._id} email=${email}`);
+    }
+
+    const token = generateToken(user._id);
+
+    res.json({
+      success: true,
+      message: 'Google sign-in successful',
+      successMessage: AUTH_MESSAGES.LOGGED_IN,
+      token,
+      user: {
+        id: user._id.toString(),
+        email: user.email,
+        firstName: user.firstName,
+        lastName: user.lastName,
+        onboardingComplete: user.onboardingComplete,
+      },
+    });
+  } catch (error) {
+    console.error('[auth][google] error:', error);
+    if (error?.code === 11000) {
+      return res.status(409).json({ error: AUTH_MESSAGES.USER_EXISTS });
+    }
+    res.status(500).json({
+      success: false,
+      message: 'Google sign-in failed',
+      error: error.message,
     });
   }
 };

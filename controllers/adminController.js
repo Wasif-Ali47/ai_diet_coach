@@ -1,71 +1,6 @@
 import User from '../models/User.js';
 import MealPlan from '../models/MealPlan.js';
-
-// Initialize Firebase Admin for admin operations (broadcast notifications)
-let adminInitialized = false;
-(async () => {
-  try {
-    const firebaseAdmin = await import('firebase-admin');
-    const admin = firebaseAdmin.default;
-    const fs = await import('fs');
-    const path = await import('path');
-    const { fileURLToPath } = await import('url');
-    const { dirname } = await import('path');
-
-    let serviceAccount = null;
-
-    // Try to get service account from environment variable first
-    if (process.env.FIREBASE_SERVICE_ACCOUNT) {
-      try {
-        serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
-        console.log('[AdminController] Using FIREBASE_SERVICE_ACCOUNT from environment variable');
-      } catch (e) {
-        console.log('[AdminController] Failed to parse FIREBASE_SERVICE_ACCOUNT env var, trying file...');
-      }
-    }
-
-    // If not in env var, try to read from file
-    if (!serviceAccount) {
-      try {
-        const __filename = fileURLToPath(import.meta.url);
-        const __dirname = dirname(__filename);
-        const serviceAccountPath = path.join(__dirname, '..', 'firebase-service-account.json');
-        
-        if (fs.existsSync(serviceAccountPath)) {
-          const fileContent = fs.readFileSync(serviceAccountPath, 'utf8');
-          serviceAccount = JSON.parse(fileContent);
-          console.log('[AdminController] Loaded Firebase service account from file: firebase-service-account.json');
-        } else {
-          console.log('[AdminController] firebase-service-account.json not found at:', serviceAccountPath);
-        }
-      } catch (fileError) {
-        console.log('[AdminController] Error reading firebase-service-account.json:', fileError.message);
-      }
-    }
-
-    if (serviceAccount) {
-      if (!admin.apps || admin.apps.length === 0) {
-        admin.initializeApp({
-          credential: admin.credential.cert(serviceAccount),
-        });
-        adminInitialized = true;
-        console.log('[AdminController] ✅ Firebase Admin initialized for notifications');
-      } else {
-        adminInitialized = true;
-        console.log('[AdminController] ✅ Firebase Admin already initialized');
-      }
-    } else {
-      console.log('[AdminController] ❌ FIREBASE_SERVICE_ACCOUNT env var not set and firebase-service-account.json not found.');
-      console.log('[AdminController] Admin notifications will be disabled.');
-      console.log('[AdminController] To enable notifications:');
-      console.log('[AdminController]   1. Set FIREBASE_SERVICE_ACCOUNT environment variable with your Firebase service account JSON, OR');
-      console.log('[AdminController]   2. Place firebase-service-account.json in the backend directory');
-    }
-  } catch (error) {
-    console.log('[AdminController] ❌ Firebase Admin initialization error:', error.message);
-    console.log('[AdminController] Stack:', error.stack);
-  }
-})();
+import { getMessaging } from '../utils/firebaseAdminInit.js';
 
 /**
  * Get all users for admin dashboard
@@ -200,25 +135,12 @@ export const getAllMealPlans = async (req, res) => {
 export const broadcastNotification = async (req, res) => {
   console.log('[broadcastNotification] Function called');
   try {
-    // Import firebase-admin dynamically to check if it's available
-    let admin;
-    try {
-      const firebaseAdmin = await import('firebase-admin');
-      admin = firebaseAdmin.default;
-    } catch (err) {
-      console.error('[broadcastNotification] Failed to import firebase-admin:', err);
+    const messaging = getMessaging();
+    if (!messaging) {
+      console.log('[broadcastNotification] Firebase Admin not initialized - returning 503');
       return res.status(503).json({
         success: false,
-        message: 'Push notifications not configured. Firebase Admin SDK not available.',
-      });
-    }
-
-    console.log('[broadcastNotification] Checking admin initialization, initialized:', adminInitialized);
-    if (!adminInitialized || !admin.apps || admin.apps.length === 0) {
-      console.log('[broadcastNotification] Admin not initialized - returning 503');
-      return res.status(503).json({
-        success: false,
-        message: 'Push notifications not configured. Firebase Admin not initialized. Please set FIREBASE_SERVICE_ACCOUNT environment variable.',
+        message: 'Push notifications not configured. Place firebase-service-account.json in backend/ or set FIREBASE_SERVICE_ACCOUNT.',
       });
     }
 
@@ -291,7 +213,7 @@ export const broadcastNotification = async (req, res) => {
       };
 
       try {
-        const response = await admin.messaging().sendEachForMulticast(message);
+        const response = await messaging.sendEachForMulticast(message);
         totalSuccess += response.successCount || 0;
         totalFailure += response.failureCount || 0;
 

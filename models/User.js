@@ -11,7 +11,12 @@ const userSchema = new mongoose.Schema({
   },
   password: {
     type: String,
-    required: false // Optional for guest users
+    required: false // Optional for guest / Google users
+  },
+  googleId: {
+    type: String,
+    unique: true,
+    sparse: true,
   },
   otp: {
     type: String,
