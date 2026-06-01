@@ -9,57 +9,38 @@ import { getMessaging } from '../utils/firebaseAdminInit.js';
  */
 export const getUsageOverview = async (req, res) => {
   try {
-    const agg = await User.aggregate([
-      {
-        $group: {
-          _id: null,
-          users: { $sum: 1 },
-          bannedUsers: {
-            $sum: { $cond: [{ $eq: ['$isBanned', true] }, 1, 0] },
+    const [userAgg, chatAgg] = await Promise.all([
+      User.aggregate([
+        {
+          $group: {
+            _id: null,
+            users: { $sum: 1 },
+            bannedUsers: { $sum: { $cond: [{ $eq: ['$isBanned', true] }, 1, 0] } },
           },
-          totalPromptTokens: { $sum: { $ifNull: ['$openAiUsage.promptTokens', 0] } },
-          totalCompletionTokens: { $sum: { $ifNull: ['$openAiUsage.completionTokens', 0] } },
-          totalTokens: { $sum: { $ifNull: ['$openAiUsage.totalTokens', 0] } },
-          totalRequests: { $sum: { $ifNull: ['$openAiUsage.requestCount', 0] } },
         },
-      },
+      ]),
+      ChatUsage.aggregate([
+        { $match: { feature: 'care-chat' } },
+        {
+          $group: {
+            _id: null,
+            totalTokens: { $sum: { $ifNull: ['$usage.totalTokens', 0] } },
+            totalRequests: { $sum: 1 },
+          },
+        },
+      ]),
     ]);
 
-    const topUsers = await User.find({})
-      .select('firstName lastName email isBanned openAiUsage')
-      .sort({ 'openAiUsage.totalTokens': -1 })
-      .limit(20)
-      .lean();
-
-    const summary = agg[0] || {
-      users: 0,
-      bannedUsers: 0,
-      totalPromptTokens: 0,
-      totalCompletionTokens: 0,
-      totalTokens: 0,
-      totalRequests: 0,
+    const summary = {
+      users: userAgg[0]?.users || 0,
+      bannedUsers: userAgg[0]?.bannedUsers || 0,
+      totalTokens: chatAgg[0]?.totalTokens || 0,
+      totalRequests: chatAgg[0]?.totalRequests || 0,
     };
-    delete summary._id;
 
-    console.log(`[admin/usage] users=${summary.users} banned=${summary.bannedUsers} tokens=${summary.totalTokens}`);
+    console.log(`[admin/usage] users=${summary.users} banned=${summary.bannedUsers} tokens=${summary.totalTokens} requests=${summary.totalRequests}`);
 
-    return res.json({
-      success: true,
-      summary,
-      topUsers: topUsers.map((u) => ({
-        id: u._id,
-        name: `${u.firstName || ''} ${u.lastName || ''}`.trim(),
-        email: u.email || '',
-        isBanned: !!u.isBanned,
-        openAiUsage: {
-          promptTokens: Number(u.openAiUsage?.promptTokens) || 0,
-          completionTokens: Number(u.openAiUsage?.completionTokens) || 0,
-          totalTokens: Number(u.openAiUsage?.totalTokens) || 0,
-          requestCount: Number(u.openAiUsage?.requestCount) || 0,
-          lastUsedAt: u.openAiUsage?.lastUsedAt || null,
-        },
-      })),
-    });
+    return res.json({ success: true, summary });
   } catch (error) {
     console.error('[admin/usage] error:', error);
     return res.status(500).json({ success: false, message: 'Failed to fetch usage overview' });
@@ -71,34 +52,51 @@ export const getUsageOverview = async (req, res) => {
  */
 export const getUsers = async (req, res) => {
   try {
-    const users = await User.find({})
-      .select('-password -otp -resetOTP')
-      .sort({ createdAt: -1 })
-      .lean();
+    const [users, chatAgg] = await Promise.all([
+      User.find({}).select('-password -otp -resetOTP').sort({ createdAt: -1 }).lean(),
+      ChatUsage.aggregate([
+        { $match: { feature: 'care-chat', userId: { $ne: null } } },
+        {
+          $group: {
+            _id: '$userId',
+            totalTokens: { $sum: { $ifNull: ['$usage.totalTokens', 0] } },
+            requestCount: { $sum: 1 },
+            lastUsedAt: { $max: '$createdAt' },
+          },
+        },
+      ]),
+    ]);
 
-    const rows = users.map((u) => ({
-      id: u._id,
-      email: u.email || '',
-      firstName: u.firstName || '',
-      lastName: u.lastName || '',
-      emailVerified: !!u.emailVerified,
-      healthConditions: u.healthConditions || [],
-      onboardingComplete: u.onboardingComplete || false,
-      active: u.active !== false,
-      isBanned: !!u.isBanned,
-      bannedAt: u.bannedAt || null,
-      bannedReason: u.bannedReason || '',
-      createdAt: u.createdAt,
-      updatedAt: u.updatedAt,
-      deviceTokenCount: Array.isArray(u.deviceTokens) ? u.deviceTokens.length : 0,
-      openAiUsage: {
-        promptTokens: Number(u.openAiUsage?.promptTokens) || 0,
-        completionTokens: Number(u.openAiUsage?.completionTokens) || 0,
-        totalTokens: Number(u.openAiUsage?.totalTokens) || 0,
-        requestCount: Number(u.openAiUsage?.requestCount) || 0,
-        lastUsedAt: u.openAiUsage?.lastUsedAt || null,
-      },
-    }));
+    // Build a lookup map: userId string -> chat stats
+    const chatMap = {};
+    for (const row of chatAgg) {
+      chatMap[String(row._id)] = row;
+    }
+
+    const rows = users.map((u) => {
+      const chat = chatMap[String(u._id)] || {};
+      return {
+        id: u._id,
+        email: u.email || '',
+        firstName: u.firstName || '',
+        lastName: u.lastName || '',
+        emailVerified: !!u.emailVerified,
+        healthConditions: u.healthConditions || [],
+        onboardingComplete: u.onboardingComplete || false,
+        active: u.active !== false,
+        isBanned: !!u.isBanned,
+        bannedAt: u.bannedAt || null,
+        bannedReason: u.bannedReason || '',
+        createdAt: u.createdAt,
+        updatedAt: u.updatedAt,
+        deviceTokenCount: Array.isArray(u.deviceTokens) ? u.deviceTokens.length : 0,
+        openAiUsage: {
+          totalTokens: Number(chat.totalTokens) || 0,
+          requestCount: Number(chat.requestCount) || 0,
+          lastUsedAt: chat.lastUsedAt || null,
+        },
+      };
+    });
 
     return res.json({ success: true, users: rows });
   } catch (error) {

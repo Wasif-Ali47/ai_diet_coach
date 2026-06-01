@@ -8,7 +8,6 @@ import {
   generateFoodSwapsWithAI,
   generateGroceryListWithAI
 } from '../services/openaiService.js';
-import { recordOpenAiUsage } from '../utils/trackUsage.js';
 
 /**
  * Calculate daily calorie target
@@ -115,7 +114,6 @@ export const generateMealPlan = async (req, res) => {
           1
         );
         aiDays = [{ meals: result?.meals || [] }];
-        recordOpenAiUsage(req.userId, result?.usage, 'meal-plan', 'gpt-4o-mini').catch(() => {});
       } catch (err) {
         console.warn('[generateMealPlan] Single-day AI generation failed, will use fallback:', err.message);
         aiDays = [{ meals: [] }];
@@ -129,7 +127,6 @@ export const generateMealPlan = async (req, res) => {
         if (result?.days && Array.isArray(result.days) && result.days.length >= 7) {
           console.log('[generateMealPlan] ✅ Successfully generated full 7-day plan in one call');
           aiDays = result.days;
-          recordOpenAiUsage(req.userId, result.usage, 'meal-plan', 'gpt-4o-mini').catch(() => {});
         } else {
           throw new Error('Incomplete 7-day plan received');
         }
@@ -158,21 +155,6 @@ export const generateMealPlan = async (req, res) => {
         aiDays = dayResults.map((result) => ({
           meals: result?.meals || []
         }));
-
-        // Record cumulative usage for all days
-        const combinedUsage = dayResults.reduce(
-          (acc, r) => {
-            if (!r?.usage) return acc;
-            acc.prompt_tokens += r.usage.prompt_tokens || 0;
-            acc.completion_tokens += r.usage.completion_tokens || 0;
-            acc.total_tokens += r.usage.total_tokens || 0;
-            return acc;
-          },
-          { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 }
-        );
-        if (combinedUsage.total_tokens > 0) {
-          recordOpenAiUsage(req.userId, combinedUsage, 'meal-plan', 'gpt-4o-mini').catch(() => {});
-        }
       }
     }
 
