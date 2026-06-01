@@ -94,6 +94,7 @@ import exportRoutes from './routes/export.js';
 import logRoutes from './routes/logs.js';
 import homeRoutes from './routes/home.js';
 import knowledgeRoutes from './routes/knowledge.js';
+import faqRoutes from './routes/faq.js';
 
 // API Routes
 app.use('/api/auth', authRoutes);
@@ -113,6 +114,7 @@ app.use('/api/export', exportRoutes);
 app.use('/api/admin/auth', adminAuthRoutes);
 app.use('/api/admin', adminRoutes);
 app.use('/api/knowledge', knowledgeRoutes);
+app.use('/api/faq', faqRoutes);
 
 // API index (for humans / monitoring — lists main route groups)
 app.get('/api', (req, res) => {
