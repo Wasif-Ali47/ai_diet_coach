@@ -151,11 +151,12 @@ export const setUserBanState = async (req, res) => {
 
     const banValue = req.body?.isBanned;
     const isBanned = banValue === true || banValue === 'true' || banValue === 1 || banValue === '1';
+    // Ban only affects chat access; `active` is NOT changed here so
+    // meal-plan generation and all other features keep working.
     const update = {
       isBanned,
       bannedAt: isBanned ? new Date() : null,
       bannedReason: isBanned ? String(req.body?.bannedReason || '').trim() : '',
-      active: !isBanned,
     };
 
     const user = await User.findByIdAndUpdate(id, update, { new: true }).select('-password');
@@ -170,7 +171,6 @@ export const setUserBanState = async (req, res) => {
         isBanned: user.isBanned,
         bannedAt: user.bannedAt,
         bannedReason: user.bannedReason,
-        active: user.active,
       },
     });
   } catch (error) {

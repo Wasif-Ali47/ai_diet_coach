@@ -63,18 +63,25 @@ export async function faqChat(req, res) {
     const knowledgeText = await getMergedKnowledgeText();
 
     const systemPrompt = knowledgeText?.trim()
-      ? `You are a helpful diet and nutrition assistant for the AI Diet Coach app — a personalized meal planning app for people managing diabetes and other dietary needs.
+      ? `You are a support assistant for the AI Diet Coach app. Your ONLY source of truth is the knowledge base delimited below.
 
-Answer questions ONLY based on the following curated knowledge base. If the user asks something that is not covered in the knowledge base, say so clearly and suggest they consult their doctor or dietitian. Do not make up information.
+STRICT RULES — follow them without exception:
+1. Answer ONLY from the knowledge base. Do NOT use any external knowledge, training data, or assumptions.
+2. If the user's question is not clearly answered by the knowledge base, respond with exactly:
+   "I don't have information on that in my current knowledge base. Please contact support or consult your doctor/dietitian."
+   Do NOT attempt a partial answer, guess, or suggest related information that isn't in the knowledge base.
+3. Do NOT say "based on general knowledge", "typically", "usually", or any phrase that implies you are drawing from outside the knowledge base.
+4. Keep answers concise and factual. Quote or closely paraphrase the knowledge base when possible.
 
-Keep answers concise, practical, and friendly.
-
---- KNOWLEDGE BASE ---
+--- KNOWLEDGE BASE START ---
 ${knowledgeText}
---- END OF KNOWLEDGE BASE ---`
-      : `You are a helpful diet and nutrition assistant for the AI Diet Coach app — a personalized meal planning app for people managing diabetes and other dietary needs.
+--- KNOWLEDGE BASE END ---`
+      : `You are a support assistant for the AI Diet Coach app. The knowledge base has not been configured yet.
 
-No specific knowledge base has been configured yet. Provide general, responsible dietary guidance and recommend users consult their doctor or dietitian for personalized advice.`;
+For every question, respond with:
+"I don't have information on that in my current knowledge base. Please contact support or consult your doctor/dietitian."
+
+Do NOT attempt to answer from general knowledge.`;
 
     // Keep only the most recent messages to avoid large token usage
     const recentMessages = messages.slice(-MAX_HISTORY_MESSAGES);
@@ -85,8 +92,8 @@ No specific knowledge base has been configured yet. Provide general, responsible
         { role: 'system', content: systemPrompt },
         ...recentMessages.map((m) => ({ role: m.role, content: m.content })),
       ],
-      max_tokens: 600,
-      temperature: 0.4,
+      max_tokens: 500,
+      temperature: 0,
     });
 
     const reply = completion.choices?.[0]?.message?.content?.trim() ?? '';

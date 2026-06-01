@@ -110,6 +110,16 @@ export const sendMessage = async (req, res) => {
       });
     }
 
+    // Chat-only ban check — other features (meal plans etc.) are unaffected
+    if (user.isBanned) {
+      return res.status(403).json({
+        success: false,
+        code: 'ACCOUNT_BANNED',
+        message: 'Your account has been suspended. Please contact support.',
+        bannedReason: user.bannedReason || '',
+      });
+    }
+
     const entitlement = await buildEntitlement(user);
     if (entitlement.hardLocked) {
       return res.status(402).json({
