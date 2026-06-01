@@ -38,6 +38,8 @@ const corsOptions = {
     
     const allowedOrigins = [
       'https://adminnutriguide.vercel.app',
+      'https://adminofallapss.oxmite.com',
+      'https://allappsadminreact.oxmite.com',
       'http://localhost:3000',
       'http://localhost:3001',
       'http://127.0.0.1:3000',
