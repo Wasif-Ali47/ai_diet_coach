@@ -2,6 +2,7 @@ import mongoose from 'mongoose';
 import ChatMessage from '../models/ChatMessage.js';
 import User from '../models/User.js';
 import { generateChatResponse } from '../services/openaiService.js';
+import { recordOpenAiUsage } from '../utils/trackUsage.js';
 import { verifyIapPurchase } from '../services/iapVerificationService.js';
 import { validationResult } from 'express-validator';
 import {
@@ -176,6 +177,7 @@ export const sendMessage = async (req, res) => {
         conversationTitle,
       });
       await aiMessage.save();
+      recordOpenAiUsage(req.userId, aiResponse.usage, 'care-chat', 'gpt-4o-mini').catch(() => {});
 
       res.json({
         success: true,

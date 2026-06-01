@@ -180,7 +180,7 @@ Return JSON only:
       throw new Error('Invalid meal structure');
     }
 
-    return meals;
+    return { meals, usage: response.usage || null };
   } catch (error) {
     console.error(`OpenAI meal plan generation error for day ${dayNumber}:`, error.message);
     throw error;
@@ -266,7 +266,7 @@ Return JSON only:
       }))
     }));
 
-    return days;
+    return { days, usage: response.usage || null };
   } catch (error) {
     console.error('OpenAI meal plan generation error:', error.message);
     throw error;
@@ -550,7 +550,8 @@ ${context}`;
     return {
       text: aiResponse,
       confidence,
-      type: responseType
+      type: responseType,
+      usage: response.usage || null,
     };
   } catch (error) {
     console.error('OpenAI chat error:', error);

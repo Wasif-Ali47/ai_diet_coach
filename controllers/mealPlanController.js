@@ -8,6 +8,7 @@ import {
   generateFoodSwapsWithAI,
   generateGroceryListWithAI
 } from '../services/openaiService.js';
+import { recordOpenAiUsage } from '../utils/trackUsage.js';
 
 /**
  * Calculate daily calorie target
@@ -107,13 +108,14 @@ export const generateMealPlan = async (req, res) => {
       // Single-day path: one OpenAI call only
       console.log('[generateMealPlan] Generating single-day plan...');
       try {
-        const dayMeals = await generateMealPlanDayWithAI(
+        const result = await generateMealPlanDayWithAI(
           user,
           dailyCalorieTarget,
           dailyMacroTargets,
           1
         );
-        aiDays = [{ meals: dayMeals || [] }];
+        aiDays = [{ meals: result?.meals || [] }];
+        recordOpenAiUsage(req.userId, result?.usage, 'meal-plan', 'gpt-4o-mini').catch(() => {});
       } catch (err) {
         console.warn('[generateMealPlan] Single-day AI generation failed, will use fallback:', err.message);
         aiDays = [{ meals: [] }];
@@ -122,10 +124,12 @@ export const generateMealPlan = async (req, res) => {
       // Try to generate all 7 days in one API call (faster)
       try {
         console.log('[generateMealPlan] Attempting to generate full 7-day plan in one API call...');
-        aiDays = await generateMealPlanWithAI(user, dailyCalorieTarget, dailyMacroTargets);
+        const result = await generateMealPlanWithAI(user, dailyCalorieTarget, dailyMacroTargets);
 
-        if (aiDays && Array.isArray(aiDays) && aiDays.length >= 7) {
+        if (result?.days && Array.isArray(result.days) && result.days.length >= 7) {
           console.log('[generateMealPlan] ✅ Successfully generated full 7-day plan in one call');
+          aiDays = result.days;
+          recordOpenAiUsage(req.userId, result.usage, 'meal-plan', 'gpt-4o-mini').catch(() => {});
         } else {
           throw new Error('Incomplete 7-day plan received');
         }
@@ -144,16 +148,31 @@ export const generateMealPlan = async (req, res) => {
             generateMealPlanDayWithAI(user, dailyCalorieTarget, dailyMacroTargets, i + 1)
               .catch(err => {
                 console.warn(`[generateMealPlan] Day ${i + 1} AI generation failed, will use fallback:`, err.message);
-                return null; // Return null to trigger fallback
+                return null;
               })
           );
         }
 
         const dayResults = await Promise.all(dayPromises);
 
-        aiDays = dayResults.map((meals, index) => ({
-          meals: meals || []
+        aiDays = dayResults.map((result) => ({
+          meals: result?.meals || []
         }));
+
+        // Record cumulative usage for all days
+        const combinedUsage = dayResults.reduce(
+          (acc, r) => {
+            if (!r?.usage) return acc;
+            acc.prompt_tokens += r.usage.prompt_tokens || 0;
+            acc.completion_tokens += r.usage.completion_tokens || 0;
+            acc.total_tokens += r.usage.total_tokens || 0;
+            return acc;
+          },
+          { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 }
+        );
+        if (combinedUsage.total_tokens > 0) {
+          recordOpenAiUsage(req.userId, combinedUsage, 'meal-plan', 'gpt-4o-mini').catch(() => {});
+        }
       }
     }
 

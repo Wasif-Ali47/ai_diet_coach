@@ -1,108 +1,216 @@
+import mongoose from 'mongoose';
 import User from '../models/User.js';
 import MealPlan from '../models/MealPlan.js';
+import ChatUsage from '../models/ChatUsage.js';
 import { getMessaging } from '../utils/firebaseAdminInit.js';
 
 /**
- * Get all users for admin dashboard
+ * GET /api/admin/usage
  */
-export const getUsers = async (req, res) => {
+export const getUsageOverview = async (req, res) => {
   try {
-    const users = await User.find({})
-      .select('-password')
-      .sort({ createdAt: -1 })
+    const agg = await User.aggregate([
+      {
+        $group: {
+          _id: null,
+          users: { $sum: 1 },
+          bannedUsers: {
+            $sum: { $cond: [{ $eq: ['$isBanned', true] }, 1, 0] },
+          },
+          totalPromptTokens: { $sum: { $ifNull: ['$openAiUsage.promptTokens', 0] } },
+          totalCompletionTokens: { $sum: { $ifNull: ['$openAiUsage.completionTokens', 0] } },
+          totalTokens: { $sum: { $ifNull: ['$openAiUsage.totalTokens', 0] } },
+          totalRequests: { $sum: { $ifNull: ['$openAiUsage.requestCount', 0] } },
+        },
+      },
+    ]);
+
+    const topUsers = await User.find({})
+      .select('firstName lastName email isBanned openAiUsage')
+      .sort({ 'openAiUsage.totalTokens': -1 })
+      .limit(20)
       .lean();
 
-    const formatted = users.map((u) => ({
-      id: u._id,
-      email: u.email,
-      firstName: u.firstName,
-      lastName: u.lastName,
-      healthConditions: u.healthConditions || [],
-      onboardingComplete: u.onboardingComplete || false,
-      active: u.active !== false, // default true if not set
-    }));
+    const summary = agg[0] || {
+      users: 0,
+      bannedUsers: 0,
+      totalPromptTokens: 0,
+      totalCompletionTokens: 0,
+      totalTokens: 0,
+      totalRequests: 0,
+    };
+    delete summary._id;
 
-    res.json({
+    console.log(`[admin/usage] users=${summary.users} banned=${summary.bannedUsers} tokens=${summary.totalTokens}`);
+
+    return res.json({
       success: true,
-      users: formatted,
+      summary,
+      topUsers: topUsers.map((u) => ({
+        id: u._id,
+        name: `${u.firstName || ''} ${u.lastName || ''}`.trim(),
+        email: u.email || '',
+        isBanned: !!u.isBanned,
+        openAiUsage: {
+          promptTokens: Number(u.openAiUsage?.promptTokens) || 0,
+          completionTokens: Number(u.openAiUsage?.completionTokens) || 0,
+          totalTokens: Number(u.openAiUsage?.totalTokens) || 0,
+          requestCount: Number(u.openAiUsage?.requestCount) || 0,
+          lastUsedAt: u.openAiUsage?.lastUsedAt || null,
+        },
+      })),
     });
   } catch (error) {
-    console.error('Admin get users error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Failed to fetch users',
-      error: error.message,
-    });
+    console.error('[admin/usage] error:', error);
+    return res.status(500).json({ success: false, message: 'Failed to fetch usage overview' });
   }
 };
 
 /**
- * Toggle user active/deactivated
+ * GET /api/admin/users
+ */
+export const getUsers = async (req, res) => {
+  try {
+    const users = await User.find({})
+      .select('-password -otp -resetOTP')
+      .sort({ createdAt: -1 })
+      .lean();
+
+    const rows = users.map((u) => ({
+      id: u._id,
+      email: u.email || '',
+      firstName: u.firstName || '',
+      lastName: u.lastName || '',
+      emailVerified: !!u.emailVerified,
+      healthConditions: u.healthConditions || [],
+      onboardingComplete: u.onboardingComplete || false,
+      active: u.active !== false,
+      isBanned: !!u.isBanned,
+      bannedAt: u.bannedAt || null,
+      bannedReason: u.bannedReason || '',
+      createdAt: u.createdAt,
+      updatedAt: u.updatedAt,
+      deviceTokenCount: Array.isArray(u.deviceTokens) ? u.deviceTokens.length : 0,
+      openAiUsage: {
+        promptTokens: Number(u.openAiUsage?.promptTokens) || 0,
+        completionTokens: Number(u.openAiUsage?.completionTokens) || 0,
+        totalTokens: Number(u.openAiUsage?.totalTokens) || 0,
+        requestCount: Number(u.openAiUsage?.requestCount) || 0,
+        lastUsedAt: u.openAiUsage?.lastUsedAt || null,
+      },
+    }));
+
+    return res.json({ success: true, users: rows });
+  } catch (error) {
+    console.error('[admin:getUsers] error:', error);
+    return res.status(500).json({ success: false, message: 'Failed to fetch users', error: error.message });
+  }
+};
+
+/**
+ * PUT /api/admin/users/:id
+ */
+export const updateUser = async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({ success: false, message: 'Invalid user id' });
+    }
+
+    const allowedFields = ['firstName', 'lastName', 'email', 'emailVerified'];
+    const payload = {};
+    for (const key of allowedFields) {
+      if (req.body[key] !== undefined) payload[key] = req.body[key];
+    }
+
+    if (payload.email && typeof payload.email === 'string') {
+      payload.email = payload.email.trim().toLowerCase();
+    }
+
+    if (Object.keys(payload).length === 0) {
+      return res.status(400).json({ success: false, message: 'No valid fields to update' });
+    }
+
+    const user = await User.findByIdAndUpdate(id, payload, { new: true }).select('-password');
+    if (!user) return res.status(404).json({ success: false, message: 'User not found' });
+
+    return res.json({ success: true, message: 'User updated successfully', user });
+  } catch (error) {
+    console.error('[admin:updateUser] error:', error);
+    return res.status(500).json({ success: false, message: 'Failed to update user', error: error.message });
+  }
+};
+
+/**
+ * PATCH /api/admin/users/:id/ban
+ */
+export const setUserBanState = async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({ success: false, message: 'Invalid user id' });
+    }
+
+    const banValue = req.body?.isBanned;
+    const isBanned = banValue === true || banValue === 'true' || banValue === 1 || banValue === '1';
+    const update = {
+      isBanned,
+      bannedAt: isBanned ? new Date() : null,
+      bannedReason: isBanned ? String(req.body?.bannedReason || '').trim() : '',
+      active: !isBanned,
+    };
+
+    const user = await User.findByIdAndUpdate(id, update, { new: true }).select('-password');
+    if (!user) return res.status(404).json({ success: false, message: 'User not found' });
+
+    return res.json({
+      success: true,
+      message: isBanned ? 'User banned successfully' : 'User unbanned successfully',
+      user: {
+        id: user._id,
+        email: user.email,
+        isBanned: user.isBanned,
+        bannedAt: user.bannedAt,
+        bannedReason: user.bannedReason,
+        active: user.active,
+      },
+    });
+  } catch (error) {
+    console.error('[admin:setUserBanState] error:', error);
+    return res.status(500).json({ success: false, message: 'Failed to update user ban state', error: error.message });
+  }
+};
+
+/**
+ * PATCH /api/admin/users/:id/toggle  (legacy activate/deactivate)
  */
 export const toggleUserActive = async (req, res) => {
   try {
     const { id } = req.params;
     const { active } = req.body;
 
-    console.log('[toggleUserActive] Request received:', { id, active });
+    if (!id) return res.status(400).json({ success: false, message: 'User ID is required' });
 
-    if (!id) {
-      return res.status(400).json({
-        success: false,
-        message: 'User ID is required',
-      });
-    }
+    const user = await User.findByIdAndUpdate(id, { active: !!active }, { new: true }).select('-password');
+    if (!user) return res.status(404).json({ success: false, message: 'User not found' });
 
-    const user = await User.findByIdAndUpdate(
-      id,
-      { active: !!active },
-      { new: true }
-    ).select('-password');
-
-    if (!user) {
-      console.log('[toggleUserActive] User not found:', id);
-      return res.status(404).json({
-        success: false,
-        message: 'User not found',
-      });
-    }
-
-    console.log('[toggleUserActive] User updated successfully:', {
-      id: user._id,
-      email: user.email,
-      active: user.active,
-    });
-
-    res.json({
+    return res.json({
       success: true,
       message: `User ${active ? 'activated' : 'deactivated'} successfully`,
-      user: {
-        id: user._id,
-        email: user.email,
-        firstName: user.firstName,
-        lastName: user.lastName,
-        active: user.active,
-      },
+      user: { id: user._id, email: user.email, active: user.active },
     });
   } catch (error) {
-    console.error('[toggleUserActive] Error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Failed to update user status',
-      error: error.message,
-    });
+    console.error('[admin:toggleUserActive] error:', error);
+    return res.status(500).json({ success: false, message: 'Failed to update user status', error: error.message });
   }
 };
 
 /**
- * Get all meal plans for admin view
+ * GET /api/admin/meal-plans
  */
 export const getAllMealPlans = async (req, res) => {
   try {
-    const plans = await MealPlan.find({})
-      .sort({ createdAt: -1 })
-      .limit(100)
-      .lean();
+    const plans = await MealPlan.find({}).sort({ createdAt: -1 }).limit(100).lean();
 
     const formatted = plans.map((p) => ({
       id: p._id,
@@ -115,29 +223,20 @@ export const getAllMealPlans = async (req, res) => {
       isActive: p.isActive,
     }));
 
-    res.json({
-      success: true,
-      mealPlans: formatted,
-    });
+    return res.json({ success: true, mealPlans: formatted });
   } catch (error) {
-    console.error('Admin get meal plans error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Failed to fetch meal plans',
-      error: error.message,
-    });
+    console.error('[admin:getAllMealPlans] error:', error);
+    return res.status(500).json({ success: false, message: 'Failed to fetch meal plans', error: error.message });
   }
 };
 
 /**
- * Broadcast push notification to all users with registered device tokens
+ * POST /api/admin/notifications/broadcast
  */
 export const broadcastNotification = async (req, res) => {
-  console.log('[broadcastNotification] Function called');
   try {
     const messaging = getMessaging();
     if (!messaging) {
-      console.log('[broadcastNotification] Firebase Admin not initialized - returning 503');
       return res.status(503).json({
         success: false,
         message: 'Push notifications not configured. Place firebase-service-account.json in backend/ or set FIREBASE_SERVICE_ACCOUNT.',
@@ -145,90 +244,54 @@ export const broadcastNotification = async (req, res) => {
     }
 
     const { title, body } = req.body || {};
-    console.log('[broadcastNotification] Extracted title and body:', { title, body });
-
     if (!title || !body) {
-      console.log('[broadcastNotification] Missing title or body - returning 400');
-      return res.status(400).json({
-        success: false,
-        message: 'Title and body are required',
-      });
+      return res.status(400).json({ success: false, message: 'Title and body are required' });
     }
 
-    console.log('[broadcastNotification] Admin broadcast notification requested:', {
-      title,
-      body,
-    });
-
-    // Fetch all active users that have at least one registered device token
-    console.log('[broadcastNotification] Querying users with device tokens...');
     const usersWithTokens = await User.find({
       'deviceTokens.0': { $exists: true },
+      isBanned: { $ne: true },
       $or: [{ active: { $exists: false } }, { active: true }],
     }).select('deviceTokens');
-    console.log('[broadcastNotification] Query completed, found users:', usersWithTokens.length);
 
     const tokensSet = new Set();
     usersWithTokens.forEach((user) => {
       (user.deviceTokens || []).forEach((dt) => {
-        if (dt?.token) {
-          tokensSet.add(dt.token);
-        }
+        if (dt?.token) tokensSet.add(dt.token);
       });
     });
 
     const allTokens = Array.from(tokensSet);
-
-    console.log('[broadcastNotification] Found users with tokens:', usersWithTokens.length);
-    console.log('[broadcastNotification] Total unique device tokens:', allTokens.length);
-
     if (allTokens.length === 0) {
-      console.log('[broadcastNotification] No tokens found - returning success with message');
       return res.status(200).json({
         success: true,
-        message: 'No device tokens found. Notification not sent. Users need to open the app at least once to register their device tokens.',
+        message: 'No device tokens found. Notification not sent.',
         totalTokens: 0,
         successCount: 0,
         failureCount: 0,
       });
     }
 
-    // FCM allows up to 500 tokens per multicast request
     const chunkSize = 500;
     let totalSuccess = 0;
     let totalFailure = 0;
 
     for (let i = 0; i < allTokens.length; i += chunkSize) {
       const chunk = allTokens.slice(i, i + chunkSize);
-
-      const message = {
-        notification: {
-          title,
-          body,
-        },
-        data: {
-          type: 'broadcast',
-        },
-        tokens: chunk,
-      };
-
       try {
-        const response = await messaging.sendEachForMulticast(message);
+        const response = await messaging.sendEachForMulticast({
+          notification: { title, body },
+          data: { type: 'broadcast' },
+          tokens: chunk,
+        });
         totalSuccess += response.successCount || 0;
         totalFailure += response.failureCount || 0;
-
-        console.log('[broadcastNotification] Chunk result:', {
-          sent: chunk.length,
-          success: response.successCount,
-          failure: response.failureCount,
-        });
       } catch (err) {
-        console.error('[broadcastNotification] Firebase messaging error for chunk:', err);
+        console.error('[admin:broadcastNotification] chunk error:', err);
         totalFailure += chunk.length;
       }
     }
 
-    console.log('[broadcastNotification] Sending success response');
     return res.json({
       success: true,
       message: 'Broadcast notification sent',
@@ -237,13 +300,183 @@ export const broadcastNotification = async (req, res) => {
       failureCount: totalFailure,
     });
   } catch (error) {
-    console.error('[broadcastNotification] Admin broadcast notification error:', error);
-    console.error('[broadcastNotification] Error stack:', error.stack);
-    return res.status(500).json({
-      success: false,
-      message: 'Failed to send notification',
-      error: error.message,
-    });
+    console.error('[admin:broadcastNotification] error:', error);
+    return res.status(500).json({ success: false, message: 'Failed to send notification', error: error.message });
   }
 };
 
+/**
+ * GET /api/admin/chat/usage
+ */
+export const getChatUsageOverview = async (req, res) => {
+  try {
+    const agg = await ChatUsage.aggregate([
+      {
+        $group: {
+          _id: null,
+          totalRequests: { $sum: 1 },
+          authenticatedRequests: {
+            $sum: { $cond: [{ $eq: ['$requestType', 'authenticated'] }, 1, 0] },
+          },
+          guestRequests: {
+            $sum: { $cond: [{ $eq: ['$requestType', 'guest'] }, 1, 0] },
+          },
+          totalPromptTokens: { $sum: { $ifNull: ['$usage.promptTokens', 0] } },
+          totalCompletionTokens: { $sum: { $ifNull: ['$usage.completionTokens', 0] } },
+          totalTokens: { $sum: { $ifNull: ['$usage.totalTokens', 0] } },
+        },
+      },
+    ]);
+
+    const summary = agg[0] || {
+      totalRequests: 0,
+      authenticatedRequests: 0,
+      guestRequests: 0,
+      totalPromptTokens: 0,
+      totalCompletionTokens: 0,
+      totalTokens: 0,
+    };
+    delete summary._id;
+
+    const topChatUsers = await ChatUsage.aggregate([
+      { $match: { userId: { $exists: true, $ne: null } } },
+      {
+        $group: {
+          _id: '$userId',
+          requestCount: { $sum: 1 },
+          promptTokens: { $sum: { $ifNull: ['$usage.promptTokens', 0] } },
+          completionTokens: { $sum: { $ifNull: ['$usage.completionTokens', 0] } },
+          totalTokens: { $sum: { $ifNull: ['$usage.totalTokens', 0] } },
+          lastUsedAt: { $max: '$createdAt' },
+        },
+      },
+      { $sort: { totalTokens: -1 } },
+      { $limit: 20 },
+      {
+        $lookup: {
+          from: 'users',
+          localField: '_id',
+          foreignField: '_id',
+          as: 'user',
+        },
+      },
+    ]);
+
+    const topUsers = topChatUsers.map((item) => ({
+      userId: item._id,
+      name: `${item.user?.[0]?.firstName || ''} ${item.user?.[0]?.lastName || ''}`.trim(),
+      email: item.user?.[0]?.email || '',
+      requestCount: item.requestCount,
+      promptTokens: item.promptTokens,
+      completionTokens: item.completionTokens,
+      totalTokens: item.totalTokens,
+      lastUsedAt: item.lastUsedAt,
+    }));
+
+    return res.json({ success: true, summary, topUsers });
+  } catch (error) {
+    console.error('[admin:getChatUsageOverview] error:', error);
+    return res.status(500).json({ success: false, message: 'Failed to fetch chat usage overview', error: error.message });
+  }
+};
+
+/**
+ * GET /api/admin/chat/usage/user/:userId
+ */
+export const getUserChatUsage = async (req, res) => {
+  try {
+    const { userId } = req.params;
+    if (!mongoose.Types.ObjectId.isValid(userId)) {
+      return res.status(400).json({ success: false, message: 'Invalid user id' });
+    }
+
+    const user = await User.findById(userId).select('firstName lastName email');
+    if (!user) return res.status(404).json({ success: false, message: 'User not found' });
+
+    const usageStats = await ChatUsage.aggregate([
+      { $match: { userId: new mongoose.Types.ObjectId(userId) } },
+      {
+        $group: {
+          _id: null,
+          requestCount: { $sum: 1 },
+          promptTokens: { $sum: { $ifNull: ['$usage.promptTokens', 0] } },
+          completionTokens: { $sum: { $ifNull: ['$usage.completionTokens', 0] } },
+          totalTokens: { $sum: { $ifNull: ['$usage.totalTokens', 0] } },
+          firstRequestAt: { $min: '$createdAt' },
+          lastRequestAt: { $max: '$createdAt' },
+        },
+      },
+    ]);
+
+    const stats = usageStats[0] || {
+      requestCount: 0, promptTokens: 0, completionTokens: 0,
+      totalTokens: 0, firstRequestAt: null, lastRequestAt: null,
+    };
+    delete stats._id;
+
+    const recentRequests = await ChatUsage.find({ userId })
+      .sort({ createdAt: -1 })
+      .limit(50)
+      .lean();
+
+    return res.json({
+      success: true,
+      user: {
+        id: user._id,
+        name: `${user.firstName || ''} ${user.lastName || ''}`.trim(),
+        email: user.email,
+      },
+      stats,
+      recentRequests: recentRequests.map((r) => ({
+        id: r._id,
+        feature: r.feature,
+        model: r.model,
+        requestType: r.requestType,
+        promptTokens: r.usage?.promptTokens || 0,
+        completionTokens: r.usage?.completionTokens || 0,
+        totalTokens: r.usage?.totalTokens || 0,
+        createdAt: r.createdAt,
+      })),
+    });
+  } catch (error) {
+    console.error('[admin:getUserChatUsage] error:', error);
+    return res.status(500).json({ success: false, message: 'Failed to fetch user chat usage', error: error.message });
+  }
+};
+
+/**
+ * GET /api/admin/chat/usage/guest
+ */
+export const getGuestChatStats = async (req, res) => {
+  try {
+    const agg = await ChatUsage.aggregate([
+      { $match: { requestType: 'guest' } },
+      {
+        $group: {
+          _id: null,
+          totalRequests: { $sum: 1 },
+          totalPromptTokens: { $sum: { $ifNull: ['$usage.promptTokens', 0] } },
+          totalCompletionTokens: { $sum: { $ifNull: ['$usage.completionTokens', 0] } },
+          totalTokens: { $sum: { $ifNull: ['$usage.totalTokens', 0] } },
+          firstRequestAt: { $min: '$createdAt' },
+          lastRequestAt: { $max: '$createdAt' },
+        },
+      },
+    ]);
+
+    const summary = agg[0] || {
+      totalRequests: 0, totalPromptTokens: 0, totalCompletionTokens: 0,
+      totalTokens: 0, firstRequestAt: null, lastRequestAt: null,
+    };
+    delete summary._id;
+
+    const avgTokens = summary.totalRequests > 0
+      ? Math.round(summary.totalTokens / summary.totalRequests)
+      : 0;
+
+    return res.json({ success: true, summary: { ...summary, averageTokensPerRequest: avgTokens } });
+  } catch (error) {
+    console.error('[admin:getGuestChatStats] error:', error);
+    return res.status(500).json({ success: false, message: 'Failed to fetch guest chat stats', error: error.message });
+  }
+};

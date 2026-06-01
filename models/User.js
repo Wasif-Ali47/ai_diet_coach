@@ -223,7 +223,28 @@ const userSchema = new mongoose.Schema({
   active: {
     type: Boolean,
     default: true
-  }
+  },
+  // Ban state (set by admin)
+  isBanned: {
+    type: Boolean,
+    default: false,
+  },
+  bannedAt: {
+    type: Date,
+    default: null,
+  },
+  bannedReason: {
+    type: String,
+    default: '',
+  },
+  // Cumulative OpenAI token usage per user
+  openAiUsage: {
+    promptTokens: { type: Number, default: 0 },
+    completionTokens: { type: Number, default: 0 },
+    totalTokens: { type: Number, default: 0 },
+    requestCount: { type: Number, default: 0 },
+    lastUsedAt: { type: Date, default: null },
+  },
 }, {
   timestamps: true
 });

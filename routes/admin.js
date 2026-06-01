@@ -1,57 +1,43 @@
 import express from 'express';
-import { verifyAdmin } from '../middleware/adminAuth.js';
+import { verifyAdmin, verifyAdminOrServiceKey } from '../middleware/adminAuth.js';
 import {
   getUsers,
+  updateUser,
+  setUserBanState,
   toggleUserActive,
   getAllMealPlans,
   broadcastNotification,
+  getUsageOverview,
+  getChatUsageOverview,
+  getUserChatUsage,
+  getGuestChatStats,
 } from '../controllers/adminController.js';
 
 const router = express.Router();
 
-// Debug middleware to log all admin route requests
-router.use((req, res, next) => {
-  console.log(`[Admin Routes] ${req.method} ${req.path} - Headers:`, {
-    authorization: req.headers.authorization ? 'present' : 'missing',
-  });
-  next();
-});
-
-// Test route without auth to verify routing works
 router.get('/test', (req, res) => {
-  res.json({
-    success: true,
-    message: 'Admin routes are working',
-    path: req.path,
-    method: req.method,
-  });
+  res.json({ success: true, message: 'Admin routes are working' });
 });
 
-// All routes below require admin auth
-router.use(verifyAdmin);
+// Routes callable by both admin JWT and service key
+router.get('/usage', verifyAdminOrServiceKey, getUsageOverview);
+router.get('/users', verifyAdminOrServiceKey, getUsers);
+router.patch('/users/:id/ban', verifyAdminOrServiceKey, setUserBanState);
+router.patch('/users/:id/toggle', verifyAdminOrServiceKey, toggleUserActive);
 
-router.get('/users', getUsers);
-router.patch('/users/:id/toggle', toggleUserActive);
+// Routes that require a full admin JWT only
+router.use((req, res, next) => {
+  if (req.method === 'OPTIONS') return next();
+  return verifyAdmin(req, res, next);
+});
 
+router.put('/users/:id', updateUser);
 router.get('/meal-plans', getAllMealPlans);
-
-// Broadcast notification route
 router.post('/notifications/broadcast', broadcastNotification);
 
-// Catch-all for debugging - should never reach here if routes are correct
-router.use('*', (req, res) => {
-  console.log(`[Admin Routes] Unmatched route: ${req.method} ${req.originalUrl}`);
-  res.status(404).json({
-    success: false,
-    message: `Admin route not found: ${req.method} ${req.originalUrl}`,
-    availableRoutes: [
-      'GET /api/admin/test',
-      'GET /api/admin/users',
-      'GET /api/admin/meal-plans',
-      'POST /api/admin/notifications/broadcast',
-    ],
-  });
-});
+// Chat usage tracking
+router.get('/chat/usage', getChatUsageOverview);
+router.get('/chat/usage/user/:userId', getUserChatUsage);
+router.get('/chat/usage/guest', getGuestChatStats);
 
 export default router;
-
